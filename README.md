@@ -10,16 +10,28 @@ Everything here is self-contained. Grab a single folder; nothing depends on the 
 | Artifact | Type | What it does | Install |
 | --- | --- | --- | --- |
 | [`agent-loop`](canvases/agent-loop) | Canvas | Human-in-the-loop, multi-agent build loop (kickoff → research → prototype → sign-off → …) rendered as an in-app canvas, backed by a GitHub issue. | `install_extension` (see below) |
+| [`sqlite`](canvases/sqlite) | Canvas | Browse local SQLite databases — tables/schema, row preview, SQL runner (reads + writes). | `node scripts/install-canvases.mjs --only sqlite` or `install_extension` |
 | [`postrboard`](skills/postrboard) | Skill | Applies the Postrboard design language to frontend work — quiet CSS for loud products; restrained, code-native, non-generic. | Copy folder (see below) |
 
 ## Installing by type
 
 ### Canvases
 
-Point the Copilot CLI's `install_extension` at the canvas folder in this repo:
+**Local (recommended while developing loadout):** junction/symlink canvases into your user
+extensions directory so edits are live:
+
+```bash
+node scripts/install-canvases.mjs              # all canvases
+node scripts/install-canvases.mjs --only sqlite
+node scripts/install-canvases.mjs --only sqlite --copy --force   # detached promote
+```
+
+That links `~/.copilot/extensions/<name>` → `canvases/<name>`. Reload extensions afterward.
+
+**From GitHub:** point the Copilot CLI's `install_extension` at the canvas folder:
 
 ```
-install_extension url:https://github.com/burkeholland/loadout/tree/main/canvases/agent-loop scope:user
+install_extension url:https://github.com/burkeholland/loadout/tree/main/canvases/sqlite scope:user
 ```
 
 Use `scope:user` to make it available in every project, or `scope:project` to install it into the
