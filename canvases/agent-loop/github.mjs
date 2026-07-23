@@ -1,16 +1,14 @@
-// GitHub read proxy for the Agent Loop canvas.
-//
-// The canvas only ever READS GitHub — all mutations go through the orchestrator
-// agent. These helpers shell out to `gh api`, which uses the user's existing
-// `gh auth` token, so no secrets live in this process.
+// GitHub proxy for the Agent Loop canvas. Reads and deterministic workflow
+// mutations go through `gh` using argv/stdin (never a shell), so this works
+// safely on Windows and avoids command-line quoting/body-length issues.
 
 import { execFile } from "node:child_process";
 
 export const STATE_SENTINEL = "<!-- AGENT-LOOP-STATE v1 -->";
 
-function ghOnce(args, { json = true } = {}) {
+function ghOnce(args, { json = true, input = undefined, cwd = undefined } = {}) {
   return new Promise((resolve, reject) => {
-    execFile("gh", args, { timeout: 30000, maxBuffer: 20 * 1024 * 1024 }, (err, stdout, stderr) => {
+    const child = execFile("gh", args, { cwd, timeout: 30000, maxBuffer: 20 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
         reject(new Error(stderr?.toString().trim() || err.message));
         return;
@@ -25,6 +23,9 @@ function ghOnce(args, { json = true } = {}) {
         reject(new Error("Failed to parse gh output: " + e.message));
       }
     });
+    if (input !== undefined) {
+      child.stdin.end(typeof input === "string" ? input : JSON.stringify(input));
+    }
   });
 }
 
@@ -48,6 +49,145 @@ async function gh(args, opts) {
 
 export async function getIssue(owner, repo, issue) {
   return gh(["api", `repos/${owner}/${repo}/issues/${issue}`]);
+}
+
+function labelNames(issue) {
+  return (issue.labels || []).map((l) => (typeof l === "string" ? l : l.name)).filter(Boolean);
+}
+
+export async function detectRepo(workingDirectory) {
+  const r = await gh(["repo", "view", "--json", "nameWithOwner,defaultBranchRef"], { cwd: workingDirectory });
+  const name = r && r.nameWithOwner;
+  if (!name || !name.includes("/")) throw new Error("Unable to detect GitHub repository");
+  const [owner, repo] = name.split("/");
+  return { owner, repo, nameWithOwner: name, defaultBranch: r.defaultBranchRef?.name || "main" };
+}
+
+export function normalizeAgentLoopIssues(issues, limit = 5) {
+  const max = Math.max(1, Math.min(20, Number(limit) || 5));
+  return (issues || [])
+    .filter((issue) => !issue.pull_request && String(issue.state || "").toLowerCase() === "open")
+    .filter((issue) => labelNames(issue).includes("agent-loop"))
+    .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")))
+    .slice(0, max)
+    .map((issue) => ({
+      number: Number(issue.number),
+      title: String(issue.title || `Issue #${issue.number}`),
+      url: String(issue.html_url || ""),
+      updatedAt: issue.updated_at || null,
+      state: "open",
+      labels: labelNames(issue),
+    }));
+}
+
+export async function listAgentLoopIssues(owner, repo, { limit = 5 } = {}) {
+  const max = Math.max(1, Math.min(20, Number(limit) || 5));
+  const issues = await gh([
+    "api",
+    `repos/${owner}/${repo}/issues?state=open&labels=agent-loop&sort=updated&direction=desc&per_page=${max}`,
+  ]);
+  return normalizeAgentLoopIssues(issues, max);
+}
+
+export async function findIssueByReqId(owner, repo, reqId) {
+  const marker = `AL-REQ ${String(reqId || "")}`;
+  const issues = await gh(["api", "--paginate", `repos/${owner}/${repo}/issues?state=all&labels=agent-loop&per_page=100`]);
+  return (issues || []).find((iss) => String(iss.body || "").includes(marker)) || null;
+}
+
+export async function ensureLabels(owner, repo, definitions) {
+  for (const def of definitions || []) {
+    const name = def && def.name;
+    if (!name) continue;
+    const body = {
+      name,
+      color: def.color || "ededed",
+      description: def.description || "",
+    };
+    try {
+      await gh(["api", `repos/${owner}/${repo}/labels`, "--method", "POST", "--input", "-"], { input: body });
+    } catch (e) {
+      if (!/already_exists|already exists|HTTP 422/i.test(String(e.message || e))) throw e;
+    }
+  }
+}
+
+export async function createIssue(owner, repo, { title, body, labels }) {
+  return gh(["api", `repos/${owner}/${repo}/issues`, "--method", "POST", "--input", "-"], {
+    input: { title, body, labels: labels || [] },
+  });
+}
+
+export async function createComment(owner, repo, issue, body) {
+  return gh(["api", `repos/${owner}/${repo}/issues/${issue}/comments`, "--method", "POST", "--input", "-"], {
+    input: { body },
+  });
+}
+
+export async function updateComment(owner, repo, commentId, body) {
+  return gh(["api", `repos/${owner}/${repo}/issues/comments/${commentId}`, "--method", "PATCH", "--input", "-"], {
+    input: { body },
+  });
+}
+
+const WORKFLOW_LABEL = /^(agent-loop|stage:|gate:|proto-round:|impl-round:)/;
+
+export async function reconcileWorkflowLabels(owner, repo, issue, desired) {
+  const iss = await getIssue(owner, repo, issue);
+  const current = labelNames(iss);
+  const keep = current.filter((l) => !WORKFLOW_LABEL.test(l));
+  const labels = Array.from(new Set([...keep, ...(desired || [])]));
+  return gh(["api", `repos/${owner}/${repo}/issues/${issue}`, "--method", "PATCH", "--input", "-"], {
+    input: { labels },
+  });
+}
+
+export function findCommentByOpMarker(comments, marker, opId) {
+  const escapedMarker = String(marker || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedOp = String(opId || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`<!--\\s*${escapedMarker}\\s+${escapedOp}(?:\\s+([\\s\\S]*?))?\\s*-->`);
+  let found = null;
+  for (const c of comments || []) {
+    const body = String(c.body || "");
+    for (const m of body.matchAll(new RegExp(re.source, "g"))) {
+      let payload = null;
+      if (m[1]) {
+        const raw = m[1].trim();
+        try {
+          if (raw.startsWith("b64:")) {
+            payload = JSON.parse(Buffer.from(raw.slice(4).replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"));
+          } else {
+            payload = JSON.parse(raw);
+          }
+        } catch {}
+      }
+      found = { commentId: c.id, body: c.body, payload };
+    }
+  }
+  return found;
+}
+
+export async function findPullForBranch(owner, repo, branch) {
+  const pulls = await gh(["pr", "list", "--repo", `${owner}/${repo}`, "--state", "all", "--head", branch, "--json", "number,url,headRefName,headRefOid,baseRefName,state,isDraft"]);
+  const open = (pulls || []).find((p) => String(p.state).toUpperCase() === "OPEN");
+  return open || (pulls || [])[0] || null;
+}
+
+export async function getPullValidation(owner, repo, number) {
+  return gh(["pr", "view", String(number), "--repo", `${owner}/${repo}`, "--json", "number,url,headRefName,headRefOid,baseRefName,state,isDraft,mergeStateStatus,statusCheckRollup"]);
+}
+
+export async function getRequiredCheckContexts(owner, repo, base) {
+  try {
+    const r = await gh(["api", `repos/${owner}/${repo}/branches/${base}/protection/required_status_checks/contexts`]);
+    return { state: "present", contexts: Array.isArray(r) ? r : [] };
+  } catch (e) {
+    const msg = String(e.message || e);
+    if (/HTTP 404|Upgrade to GitHub Pro|make this repository public|Branch not protected/i.test(msg)) {
+      return { state: "absent", contexts: [] };
+    }
+    return { state: "unknown", contexts: [], error: msg };
+  }
 }
 
 // --- Pull request reads (feedback-gate review evidence) ----------------------
@@ -164,13 +304,16 @@ export function parseControlBlock(body) {
 }
 
 export function findControlBlock(comments) {
+  const found = [];
   for (const c of comments) {
     if (hasSentinel(c.body)) {
       const data = parseControlBlock(c.body);
-      if (data) return { commentId: c.id, data };
+      if (data) found.push({ commentId: c.id, data });
     }
   }
-  return null;
+  if (!found.length) return null;
+  found.sort((a, b) => (Number(b.data.txn || 0) - Number(a.data.txn || 0)) || (Number(a.commentId) - Number(b.commentId)));
+  return found[0];
 }
 
 // Find a comment whose body carries a `## <marker>` heading. Used to surface

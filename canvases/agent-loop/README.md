@@ -1,63 +1,52 @@
 # Agent Loop canvas (project extension)
 
-A human-in-the-loop, multi-agent **build loop** as an in-app canvas. An idea goes
-**kickoff → research → prototype → sign-off** through a chain of specialist agents, with the
-human weighing in only at the gates. The canvas is the interface; a GitHub **issue** is the
-backing store; an **orchestrator session** conducts.
+A deterministic human-in-the-loop build loop backed by a GitHub issue. The
+issue, comments, labels, and one control-block comment are the durable state.
+The extension owns orchestration; agents only generate assets and submit them
+back through the existing canvas action.
 
-This extension is **portable** — drop it into any repo and it builds in *that* repo. It has no
-hardcoded owner/repo; the target is detected at kickoff (`gh repo view`) and tracked in
-`~/.agent-loop/active.json`.
+## Flow
 
-## Install it
+`kickoff → research → prototype → sign-off → questionnaire → plan review → implement → feedback → finalize → done`
 
-Point the CLI's `install_extension` at this folder in the [loadout](https://github.com/burkeholland/loadout)
-repo:
+Human buttons POST structured `/intent` JSON. The coordinator validates the live
+control block, writes `AL-IN`/`AL-OUT`/`AL-SYS` comments, updates the control
+block, reconciles labels, mints `opId`/submission capabilities, and sends exact
+self-contained work orders with `session.send`.
 
+The idle launcher also reads `GET /issues`, which returns the five most recently
+updated open Agent Loop issues from the canvas session's repository. Selecting
+one sends `open-existing`; code validates its label and canonical control block,
+then binds that canvas instance without changing workflow state or waking an
+agent.
+
+Agents must not mutate Agent Loop issue state. A work order tells them what to
+read, what asset to produce, and to call:
+
+```json
+{ "opId": "...", "submissionToken": "...", "artifact": { } }
 ```
-install_extension url:https://github.com/burkeholland/loadout/tree/main/canvases/agent-loop scope:user
-```
 
-Use `scope:user` to make it available in every project, or `scope:project` to install it into the
-current repo under `.github/extensions/agent-loop/`. You can also just copy this folder into
-`.github/extensions/agent-loop/` by hand — the Copilot CLI auto-discovers project extensions there.
+via `submit_stage` on the already-open canvas instance.
 
-Then:
+Each newly opened canvas starts unbound at the launcher, even when `active.json`
+points to a previous workflow. Selecting or starting a build binds only that
+canvas server, so another canvas cannot retarget an existing window.
 
-1. Make sure `gh` is authenticated for the repo (`gh auth status`) — the canvas reads GitHub for
-   free using your `gh` token, and the orchestrator writes to it.
-2. Reload extensions (or restart the CLI). The `agent-loop` canvas becomes available.
+Agents inherit the user's repository credentials and therefore remain a trusted
+asset generator. The coordinator rejects workflow markers and control fields in
+submitted artifacts, but it cannot prevent a deliberately rogue agent from
+using those credentials outside the supplied work order.
 
-## Run a job
-
-1. Open a session in the project and have it **act as the Agent Loop orchestrator** (follow
-   `ORCHESTRATOR.md` at the repo root). That session opens the `agent-loop` canvas —
-   *the session that owns the canvas is the conductor* (Model A).
-2. In the canvas idle panel, type an idea (e.g. *"a date picker web component"*) and click
-   **Start the loop**. The canvas sends that as a kickoff prompt to the orchestrator.
-3. Watch the pipeline strip. Research runs, then prototype options arrive at the **sign-off**
-   gate. **Refine** (describe changes → a new round) or **Approve** (advance). The pipeline
-   strip doubles as read-only nav — click a completed stage to review its artifact.
-
-## What's in here
+## Files
 
 | File | Role |
 | --- | --- |
-| `extension.mjs` | Canvas declaration + actions (`refresh`/`get_state`/`get_config`/`get_playbook`/`set_active`), `joinSession`, and the `session.send` handoff that delivers canvas prompts to the orchestrator. |
-| `server.mjs` | Local HTTP backend: serves the webview, proxies GitHub reads via `gh`, serves prototype assets from `~/.agent-loop/work/…`, proxies live prototype previews (`/prototype?url=` with a `<base>` + height-report inject), exposes `/state` (poll) + `/events` (SSE) + `/prompt` + `/open`. |
-| `webview.mjs` | The vanilla-JS UI: pipeline strip + idle/working/sign-off/done panels, in-canvas live prototype previews, the sticky decision bar, and read-only stage review. |
-| `github.mjs` | `gh`-backed read helpers + control-block and prototype-comment parsing. |
-| `playbook.mjs` | The embedded conductor playbook (served via the `get_playbook` action) so the orchestrator doesn't depend on a repo file. |
-| `postrboard-css.mjs` | The [Postrboard](https://burkeholland.github.io/postrboard-design/) design system, vendored inline so the canvas renders offline for private repos. The UI is built from its tokens/components with light + dark modes. |
+| `extension.mjs` | Canvas declaration, read-only actions, `submit_stage`, and work-order delivery. |
+| `workflow.mjs` | Explicit deterministic coordinator, control/comment rendering, transition logic, validation, queues, recovery, and work-order contracts. |
+| `server.mjs` | Loopback HTTP backend: `/state`, `/issues`, `/intent`, `/events`, `/comment`, `/pr`, `/open`, and asset serving. `/prompt` is not registered. |
+| `github.mjs` | `gh` read/mutation helpers using argv/stdin, parsers, label reconciliation, and PR reads. |
+| `webview.mjs` | UI panels and structured intent payloads. |
+| `pr.mjs` | Pure PR review snapshot/check/diff helpers. |
 
-The orchestrator playbook, stage-agent contracts, and control-block spec are **embedded in
-`playbook.mjs`** and served to the orchestrator via the `get_playbook` action — the extension is
-fully self-contained and needs no companion files in the target repo.
-
-## Notes
-
-- **One active job at a time.** `active.json` tracks a single current issue; the work dir is
-  namespaced `~/.agent-loop/work/<owner>/<repo>/<issue>/round-<N>/<option>/`.
-- **Private-repo friendly.** Prototypes are served locally (not committed, no public preview),
-  so it works for private repos where GitHub Pages wouldn't.
-- The code repo only ever receives the **final PR** (implementation stage — later).
+Prototype and demo assets are served from `~\.agent-loop\work\<owner>\<repo>\<issue>\...` and are hash/containment validated before state advances.

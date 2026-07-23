@@ -1,6 +1,6 @@
 // Webview renderer for the Agent Loop canvas.
 // Vanilla JS single-page app. Reads durable state from /state (issue-authoritative)
-// on a poll + SSE nudge; sends real work to the orchestrator via POST /prompt.
+// on a poll + SSE nudge; sends structured human intent via POST /intent.
 //
 // Styled with the vendored Postrboard design system (inlined for offline/private
 // repos). Quiet, code-native surfaces; one accent per state; light + dark modes.
@@ -78,6 +78,28 @@ export function renderHtml(token = "", assetBase = "") {
   .btn:disabled { opacity: 0.5; cursor: default; box-shadow: none; transform: none; }
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
   label.field { display: block; font-size: 12px; font-weight: 600; color: var(--text-muted); margin: 0 0 8px; }
+
+  /* Idle launcher */
+  .idle-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 18px -24px 0; padding: 0 24px; }
+  .idle-tab { border: 0; background: transparent; color: var(--text-muted); padding: 11px 12px;
+    border-bottom: 2px solid transparent; font: inherit; font-weight: 700; cursor: pointer; }
+  .idle-tab.active { color: var(--text); border-color: var(--coral-surface); }
+  .idle-pane { padding-top: 18px; }
+  .idle-pane[hidden] { display: none; }
+  .build-search { width: 100%; margin-bottom: 10px; }
+  .build-list { display: flex; flex-direction: column; }
+  .build-item { width: 100%; display: grid; grid-template-columns: 38px minmax(0, 1fr) auto;
+    align-items: center; gap: 12px; padding: 13px 2px; border: 0; border-top: 1px solid var(--border);
+    background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+  .build-item:hover .build-title { color: var(--azure-text); }
+  .build-item:disabled { opacity: 0.55; cursor: wait; }
+  .build-number { width: 34px; height: 34px; border: 1px solid var(--border); border-radius: var(--radius-compact);
+    display: grid; place-items: center; color: var(--text-meta); font: 11px var(--mono); }
+  .build-copy { min-width: 0; }
+  .build-title { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .build-meta { color: var(--text-meta); font-size: 11.5px; margin-top: 5px; }
+  .build-state { display: flex; align-items: center; gap: 8px; }
+  .build-empty { color: var(--text-muted); text-align: center; padding: 24px 8px 8px; font-size: 12.5px; }
 
   /* Working / status */
   .status-line { display: flex; align-items: center; gap: 14px; font-size: 15px; font-weight: 600; margin-top: 16px; }
@@ -283,7 +305,7 @@ let CAP = "";
 try { const _m = document.querySelector && document.querySelector('meta[name="al-cap"]'); if (_m) CAP = _m.getAttribute("content") || _m.content || ""; } catch (e) {}
 // Origin that serves prototype assets (/work/*). A SEPARATE, token-less loopback
 // origin: prototype pages (embedded sandboxed OR popped out to a real tab) are
-// cross-origin from this control document, so they can't read CAP or POST /prompt.
+// cross-origin from this control document, so they can't read CAP or POST /intent.
 let ASSET_BASE = "";
 try { const _a = document.querySelector && document.querySelector('meta[name="al-assets"]'); if (_a) ASSET_BASE = _a.getAttribute("content") || _a.content || ""; } catch (e) {}
 const CAPH = CAP ? { "x-al-cap": CAP } : {};
@@ -300,7 +322,10 @@ let lastGoodState = null; // most recent state WITHOUT a read error (survives ou
 let viewKey = null;     // when set, panel shows a read-only review of that stage
 let selectedPrototype = null;
 let shipReviewable = false; // did the last /pr snapshot report reviewable? Gates the Ship re-enable.
+let lastReviewedHeadSha = null; // exact head SHA from the PR snapshot that enabled Ship.
 let prReviewGen = 0;        // generation counter so a stale /pr response can't clobber a newer render.
+let idleBuildGen = 0;       // prevents a late issue-list response from repainting an active job.
+let idleBuildData = null;
 
 // ---- Color mode --------------------------------------------------------------
 function currentMode() {
@@ -403,11 +428,9 @@ async function post(path, body) {
   return data || {};
 }
 
-// ---- Prompt context (AL-CTX) -------------------------------------------------
-// Every prompt the canvas sends the orchestrator ends with a machine-readable
-// marker carrying the txn/stage/gate/round the human was looking at, so the
-// orchestrator can reject a stale or duplicate click. Kickoff has no prior txn,
-// so it carries a client-generated reqId nonce that dedupes a retried kickoff.
+// ---- Structured intents ------------------------------------------------------
+// The webview never authors orchestration prose. Buttons post a small intent
+// object; the extension validates the live control block and owns all transitions.
 let kickoffReqId = null;
 function newReqId() {
   const rnd = (typeof crypto !== "undefined" && crypto.randomUUID)
@@ -415,32 +438,27 @@ function newReqId() {
     : Math.random().toString(36).slice(2, 10);
   return "kf-" + Date.now().toString(36) + "-" + rnd;
 }
-function alctx(obj) {
-  return "\\n\\n<!-- AL-CTX " + JSON.stringify(obj) + " -->";
-}
 function ctxFor(s, extra) {
-  // Routing fields (owner/repo/issue/controlCommentId) let the orchestrator reject
-  // a prompt that a global active.json switch would otherwise mis-route to the
-  // wrong issue; headSha pins the PR revision the human actually reviewed.
   const base = { owner: s ? s.owner : null, repo: s ? s.repo : null,
     issue: s ? s.issue : null, controlCommentId: s ? s.controlCommentId : null,
-    txn: s && s.txn != null ? s.txn : null, stage: s ? s.stage : null,
-    gate: s ? s.gate : null, round: s ? s.round : null,
-    headSha: s && s.impl ? (s.impl.headSha || null) : null };
+    expectedTxn: s && s.txn != null ? s.txn : null };
   return Object.assign(base, extra || {});
 }
 
-// Single choke-point for gate submissions: guards against double-fire, appends
-// the AL-CTX marker, and reports failure so callers can re-enable their buttons.
+// Single choke-point for gate submissions: guards against double-fire and reports
+// failure so callers can re-enable their buttons.
 let submitting = false;
-async function sendPrompt(prompt, kind, ctx) {
+async function sendIntent(kind, data, ctx) {
   if (submitting) return false;
   submitting = true;
   try {
-    await post("/prompt", { prompt: prompt + alctx(ctx), kind });
+    const payload = kind === "kickoff"
+      ? { kind: "kickoff", data: data || {} }
+      : Object.assign({ kind, data: data || {} }, ctx || {});
+    await post("/intent", payload);
     return true;
   } catch (e) {
-    toast("Couldn't reach the orchestrator — try again.");
+    toast(e && e.message ? e.message : "Agent Loop request failed.");
     return false;
   } finally {
     // Re-enable after a beat; the next /state poll will re-render the panel.
@@ -509,31 +527,119 @@ function panelHead(eyebrowIcon, eyebrowText, title) {
     '<h1 class="panel-title">' + esc(title) + '</h1>';
 }
 
+function buildStage(issue) {
+  const labels = issue && Array.isArray(issue.labels) ? issue.labels : [];
+  const gate = labels.find((label) => String(label).startsWith("gate:"));
+  const stage = labels.find((label) => String(label).startsWith("stage:"));
+  if (gate) return String(gate).slice(5).replace(/-/g, " ");
+  if (stage) return String(stage).slice(6).replace(/-/g, " ");
+  return "open";
+}
+
+function relativeUpdated(value) {
+  const stamp = Date.parse(value || "");
+  if (!Number.isFinite(stamp)) return "Updated recently";
+  const minutes = Math.max(0, Math.floor((Date.now() - stamp) / 60000));
+  if (minutes < 1) return "Updated now";
+  if (minutes < 60) return "Updated " + minutes + "m ago";
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return "Updated " + hours + "h ago";
+  const days = Math.floor(hours / 24);
+  return "Updated " + days + "d ago";
+}
+
+function renderExistingBuilds(query) {
+  const list = $("buildList");
+  if (!list || !idleBuildData) return;
+  const q = String(query || "").trim().toLowerCase();
+  const issues = (idleBuildData.issues || []).filter((issue) =>
+    !q || String(issue.title || "").toLowerCase().includes(q) || String(issue.number).includes(q));
+  if (!issues.length) {
+    list.innerHTML = '<div class="build-empty">' + (q ? "No matching builds." : "No open Agent Loop builds yet.") + '</div>';
+    return;
+  }
+  list.innerHTML = issues.map((issue) => {
+    const stage = buildStage(issue);
+    return '<button class="build-item" id="buildIssue_' + esc(issue.number) + '" type="button">' +
+      '<span class="build-number">#' + esc(issue.number) + '</span>' +
+      '<span class="build-copy"><span class="build-title">' + esc(issue.title) + '</span>' +
+      '<span class="build-meta">' + esc(relativeUpdated(issue.updatedAt)) + '</span></span>' +
+      '<span class="build-state"><span class="badge badge-neutral">' + esc(stage) + '</span>' +
+      svg("chevron-right") + '</span></button>';
+  }).join("");
+  issues.forEach((issue) => {
+    const button = $("buildIssue_" + issue.number);
+    if (!button) return;
+    button.onclick = async () => {
+      button.disabled = true;
+      const ok = await sendIntent("open-existing", {}, {
+        owner: idleBuildData.owner, repo: idleBuildData.repo, issue: issue.number,
+      });
+      if (!ok) button.disabled = false;
+    };
+  });
+}
+
+async function loadExistingBuilds(gen) {
+  const status = $("buildStatus");
+  try {
+    const response = await fetch("/issues", { cache: "no-store", headers: CAPH });
+    let data = null;
+    try { data = await response.json(); } catch (e) {}
+    if (!response.ok) throw new Error((data && data.error) || ("HTTP " + response.status));
+    if (gen !== idleBuildGen || (lastState && lastState.active)) return;
+    idleBuildData = data || { issues: [] };
+    if (status) status.textContent = "";
+    renderExistingBuilds("");
+  } catch (e) {
+    if (gen !== idleBuildGen || (lastState && lastState.active)) return;
+    if (status) status.innerHTML = '<div class="build-empty">Could not load existing builds. Starting a new build is still available.</div>';
+  }
+}
+
 function renderIdle() {
+  const gen = ++idleBuildGen;
+  idleBuildData = null;
   $("panel").innerHTML =
     '<div class="card">' +
-    panelHead("loop", "New build", "Start a build") +
+    panelHead("loop", "Build launcher", "Continue where you left off") +
+    '<p class="sub">Open workflow state already stored in this repository, or start something new.</p>' +
+    '<div class="idle-tabs" role="tablist">' +
+    '<button class="idle-tab active" id="existingTab" type="button" role="tab">Existing builds</button>' +
+    '<button class="idle-tab" id="newTab" type="button" role="tab">New build</button></div>' +
+    '<div class="idle-pane" id="existingPane" role="tabpanel">' +
+    '<label class="field" for="buildSearch">Search open Agent Loop issues</label>' +
+    '<input class="input build-search" id="buildSearch" placeholder="Filter by title or issue number" />' +
+    '<div id="buildStatus"><div class="build-empty">Loading existing builds…</div></div>' +
+    '<div class="build-list" id="buildList"></div></div>' +
+    '<div class="idle-pane" id="newPane" role="tabpanel" hidden>' +
     '<p class="sub">Describe an idea. The loop researches prior art, prototypes a few real approaches, ' +
     'and brings the options back here for your sign-off. Nothing touches the code repo until the final PR.</p>' +
     '<div style="margin-top:18px"><label class="field" for="idea">Your idea</label>' +
     '<textarea class="textarea" id="idea" placeholder="e.g. A lightweight date range picker for our dashboard filters"></textarea></div>' +
     '<div class="row"><button class="btn btn-primary has-icon" id="startBtn">' + svg("send") + 'Start the loop</button>' +
-    '<span class="muted" id="startHint"></span></div>' +
+    '<span class="muted" id="startHint"></span></div></div>' +
     '</div>';
+  const selectTab = (name) => {
+    const existing = name === "existing";
+    $("existingPane").hidden = !existing;
+    $("newPane").hidden = existing;
+    $("existingTab").classList[existing ? "add" : "remove"]("active");
+    $("newTab").classList[existing ? "remove" : "add"]("active");
+  };
+  $("existingTab").onclick = () => selectTab("existing");
+  $("newTab").onclick = () => selectTab("new");
+  $("buildSearch").oninput = () => renderExistingBuilds($("buildSearch").value);
   $("startBtn").onclick = async () => {
     const idea = $("idea").value.trim();
     if (!idea) { $("idea").focus(); return; }
-    $("startBtn").disabled = true; $("startHint").textContent = "Sending to the orchestrator…";
+    $("startBtn").disabled = true; $("startHint").textContent = "Starting deterministic workflow…";
     if (!kickoffReqId) kickoffReqId = newReqId();
-    const prompt = "[AGENT-LOOP · KICKOFF]\\nA new idea was submitted from the Agent Loop canvas:\\n\\n\\"\\"\\"\\n" +
-      idea + "\\n\\"\\"\\"\\n\\nAct as the Agent Loop orchestrator and follow the embedded playbook (get_playbook) " +
-      "exactly. Honor the reqId in the AL-CTX marker below: if an agent-loop issue already carries that reqId marker " +
-      "in its body, adopt and resume it; otherwise create the issue (embedding the reqId marker), label it and seed " +
-      "the control block per the Kickoff recipe, then run the stage subagents through to the first gate.";
-    const ok = await sendPrompt(prompt, "kickoff", { reqId: kickoffReqId, stage: null, gate: null, txn: null, round: null });
-    if (ok) toast("Kickoff sent — the orchestrator is on it.");
+    const ok = await sendIntent("kickoff", { idea, reqId: kickoffReqId }, {});
+    if (ok) toast("Kickoff accepted — Agent Loop is starting research.");
     else { $("startBtn").disabled = false; $("startHint").textContent = ""; }
   };
+  loadExistingBuilds(gen);
 }
 
 function renderWorking(s) {
@@ -542,14 +648,9 @@ function renderWorking(s) {
     brief = '<div class="brief" id="brief"><span class="muted">Loading research brief…</span></div>';
   }
   const title = s.title ? s.title : "your idea";
-  // Recovery-wake (#2): a working/error panel has no human gate, so if the
-  // orchestrator crashed mid-stage it would idle forever with nothing to wake it.
-  // Detect a stalled op — an explicit error status, or a pending op whose
-  // updatedAt has gone stale — and surface a Resume affordance that prompts the
-  // orchestrator to recover (check-before-rerun on the same opId). The stale
-  // threshold is deliberately generous (15m): stage subagents run synchronously
-  // and serialized, so a healthy long build must never trip it, and a RESUME is
-  // safe even mid-run (it finds the AL-OUT already posted and finishes-without-rerun).
+  // A working/error panel has no human gate, so surface a recovery action after
+  // a generous timeout. Redispatch keeps earlier bounded capability hashes valid,
+  // allowing an agent that was still working to submit without losing its asset.
   const STALE_MS = 15 * 60 * 1000;
   const ageMs = s.updatedAt ? (Date.now() - Date.parse(s.updatedAt)) : 0;
   const isError = s.status === "error";
@@ -586,22 +687,7 @@ function renderWorking(s) {
     const btn = $("resumeBtn");
     if (btn) btn.onclick = async () => {
       btn.disabled = true;
-      const p = s.pending || {};
-      const prompt = isVerify
-        ? ("[AGENT-LOOP · RESUME] Issue #" + s.issue + ". This is a verify-pr wait (opId=" + (p.opId || "?") +
-           "). Re-run the merge-ready assertion ONLY — re-query the PR's live state/draft/head/base, " +
-           "mergeStateStatus, and required checks per the embedded playbook. Do NOT re-run Finalize. Take the " +
-           "assertion's outcome exactly: ready → done; still-pending checks or mergeability → stay in verify-pr; " +
-           "a failed required check, a moved head, or a DIRTY/BEHIND branch → re-open stage:implementing / " +
-           "gate:feedback (with an AL-SYS note) for REVISE or re-SHIP; a structural miss (PR closed, draft, " +
-           "wrong head-branch, or wrong base) → status:error naming the GitHub repair. Never set error for a " +
-           "merely-failed check.")
-        : ("[AGENT-LOOP · RESUME] Issue #" + s.issue + ". Recover the in-flight stage per the embedded " +
-           "playbook's recovery-wake protocol. The pending op is opId=" + (p.opId || "?") + " kind=" + (p.kind || "?") +
-           " round=" + (p.round != null ? p.round : "?") + ". Check whether its AL-OUT commit-point comment already exists: " +
-           "if it does, finish the transition WITHOUT re-running the subagent; otherwise re-run the SAME opId subagent, " +
-           "validate its return, and advance. Do not open a new branch, PR, or duplicate artifact.");
-      const ok = await sendPrompt(prompt, "resume", ctxFor(s, { pending: s.pending || null }));
+      const ok = await sendIntent("resume", {}, ctxFor(s));
       if (ok) toast(isVerify ? "Rechecking PR checks…" : "Resuming — recovering this stage.");
       else btn.disabled = false;
     };
@@ -759,11 +845,7 @@ function renderPrototype(s, readOnly) {
     if (!id) return;
     const note = ($("refine").value || "").trim();
     $("approveBtn").disabled = true; $("refineBtn").disabled = true;
-    let prompt = "[AGENT-LOOP · APPROVE] Issue #" + s.issue + ". The human approved prototype option \\"" + id +
-      "\\" from round " + round + ". Follow the embedded playbook's Sign-off/APPROVE recipe: post the approval as an " +
-      "AL-IN comment, advance to planning, and run the plan-questions subagent through to the questionnaire gate.";
-    if (note) prompt += " The human added directing comments to carry into planning:\\n\\n\\"\\"\\"\\n" + note + "\\n\\"\\"\\"";
-    const ok = await sendPrompt(prompt, "approve", ctxFor(s, { approved: id }));
+    const ok = await sendIntent("approve", { optionId: id, notes: note }, ctxFor(s));
     if (ok) toast("Approved " + id + " — advancing to planning.");
     else { $("approveBtn").disabled = false; $("refineBtn").disabled = false; }
   };
@@ -771,11 +853,7 @@ function renderPrototype(s, readOnly) {
     const fb = ($("refine").value || "").trim();
     if (!fb) { $("refine").focus(); toast("Add directing comments to request another round."); return; }
     $("approveBtn").disabled = true; $("refineBtn").disabled = true;
-    const prompt = "[AGENT-LOOP · ITERATE] Issue #" + s.issue + ". The human reviewed the round " + round +
-      " prototypes and wants another round:\\n\\n\\"\\"\\"\\n" + fb +
-      "\\n\\"\\"\\"\\n\\nFollow the embedded playbook's Sign-off/ITERATE recipe: post this feedback as an AL-IN " +
-      "comment, bump proto-round, run the prototype subagent for the next round, and re-open the sign-off gate.";
-    const ok = await sendPrompt(prompt, "iterate", ctxFor(s));
+    const ok = await sendIntent("iterate", { feedback: fb }, ctxFor(s));
     if (ok) toast("Feedback sent — starting a new round.");
     else { $("approveBtn").disabled = false; $("refineBtn").disabled = false; }
   };
@@ -992,12 +1070,7 @@ function paintQuestionStep(s, questions, focusStep, focusChoice) {
   if (submit) submit.onclick = async () => {
     submit.disabled = true;
     const answers = questions.map((qqq) => ({ id: qqq.id, prompt: qqq.prompt, answer: qAnswerText(qqq) }));
-    const body = answers.map((a) => a.id + ". " + a.prompt + "\\n> " + (a.answer || "(no answer)")).join("\\n\\n");
-    const prompt = "[AGENT-LOOP · ANSWERS] Issue #" + s.issue + ". The human answered the planning questionnaire:\\n\\n\\"\\"\\"\\n" +
-      body + "\\n\\"\\"\\"\\n\\nFollow the embedded playbook's Questionnaire/ANSWERS recipe: post these answers as an " +
-      "AL-IN comment, advance to planning-finalize, and run the plan subagent (finalize mode) through to the " +
-      "plan-review gate.";
-    const ok = await sendPrompt(prompt, "answers", ctxFor(s));
+    const ok = await sendIntent("answers", { answers }, ctxFor(s));
     if (ok) { qModel = null; qModelKey = null; qStep = 0; toast("Answers sent — drafting the plan."); }
     else submit.disabled = false;
   };
@@ -1045,12 +1118,7 @@ function renderPlanReview(s, readOnly) {
     if ($("planOkBtn").disabled) return; // fail-closed: plan not loaded / not visible
     const note = ($("planFb").value || "").trim();
     $("planOkBtn").disabled = true; $("planReviseBtn").disabled = true;
-    let prompt = "[AGENT-LOOP · PLAN-OK] Issue #" + s.issue + ". The human approved the implementation plan. Follow the " +
-      "embedded playbook's Plan-review/PLAN-OK recipe: post the approval as an AL-IN comment, move to " +
-      "stage:implementing (impl-round:1), and run the implement subagent on the deterministic branch agent-loop/issue-" +
-      s.issue + " (it looks up an existing branch/PR with --state all before creating) through to the feedback gate.";
-    if (note) prompt += " The human added notes to carry into implementation:\\n\\n\\"\\"\\"\\n" + note + "\\n\\"\\"\\"";
-    const ok = await sendPrompt(prompt, "plan-ok", ctxFor(s));
+    const ok = await sendIntent("plan-ok", { notes: note }, ctxFor(s));
     if (ok) toast("Plan approved — starting the build.");
     else { $("planOkBtn").disabled = false; $("planReviseBtn").disabled = false; }
   };
@@ -1058,11 +1126,7 @@ function renderPlanReview(s, readOnly) {
     const fb = ($("planFb").value || "").trim();
     if (!fb) { $("planFb").focus(); toast("Add the changes you want before requesting a revision."); return; }
     $("planOkBtn").disabled = true; $("planReviseBtn").disabled = true;
-    const prompt = "[AGENT-LOOP · PLAN-REVISE] Issue #" + s.issue + ". The human wants the plan revised:\\n\\n\\"\\"\\"\\n" + fb +
-      "\\n\\"\\"\\"\\n\\nFollow the embedded playbook's Plan-review/PLAN-REVISE recipe: post this feedback as an AL-IN " +
-      "comment, run the plan subagent again (finalize mode) with the feedback comment id in pending.inputCommentIds, " +
-      "and re-open the plan-review gate when the revised plan is ready.";
-    const ok = await sendPrompt(prompt, "plan-revise", ctxFor(s));
+    const ok = await sendIntent("plan-revise", { feedback: fb }, ctxFor(s));
     if (ok) toast("Sent — revising the plan.");
     else { $("planOkBtn").disabled = false; $("planReviseBtn").disabled = false; }
   };
@@ -1155,13 +1219,13 @@ function loadPrReview(s, gated) {
   const host = $("prReview");
   if (!host) return;
   const gen = ++prReviewGen;
-  if (gated) { shipReviewable = false; const sb = $("shipBtn"); if (sb) sb.disabled = true; }
+  if (gated) { shipReviewable = false; lastReviewedHeadSha = null; const sb = $("shipBtn"); if (sb) sb.disabled = true; }
   const rewire = () => {
     const rt = $("prRetry"); if (rt) rt.onclick = () => reload();
     const rf = $("prRefresh"); if (rf) rf.onclick = () => reload();
   };
   const reload = () => {
-    if (gated) { shipReviewable = false; const sb = $("shipBtn"); if (sb) sb.disabled = true; }
+    if (gated) { shipReviewable = false; lastReviewedHeadSha = null; const sb = $("shipBtn"); if (sb) sb.disabled = true; }
     const h = $("prReview"); if (h) h.innerHTML = '<span class="muted">Loading the PR…</span>';
     loadPrReview(s, gated);
   };
@@ -1196,13 +1260,14 @@ function loadPrReview(s, gated) {
       if (gated) {
         const ok = !!(snap && snap.available !== false && snap.reviewable === true && idComplete);
         shipReviewable = ok;
+        lastReviewedHeadSha = ok ? (snap.headRefOid || null) : null;
         const ship = $("shipBtn");
         if (ship) ship.disabled = !ok;
       }
     })
     .catch(() => {
       if (gen !== prReviewGen) return;
-      if (gated) { shipReviewable = false; const sb = $("shipBtn"); if (sb) sb.disabled = true; }
+      if (gated) { shipReviewable = false; lastReviewedHeadSha = null; const sb = $("shipBtn"); if (sb) sb.disabled = true; }
       const h = $("prReview");
       if (!h) return;
       h.innerHTML = '<span class="muted">Could not load the PR from GitHub. </span>' +
@@ -1317,11 +1382,7 @@ function renderFeedback(s, readOnly) {
   if (rlBtn && !readOnly) {
     rlBtn.onclick = async () => {
       rlBtn.disabled = true; // guard against a double-fire while the prompt is in flight
-      const prompt = "[AGENT-LOOP · REVIEW-LOCAL] Issue #" + s.issue + ". The human wants to try PR #" + (prNo || "?") +
-        " locally before deciding. Follow the embedded playbook's Feedback/REVIEW-LOCAL recipe: open PR #" + (prNo || "?") +
-        " in a session (open_pr_session on the deterministic branch " + branch + ") so the human can build and run it however " +
-        "this project runs. Do NOT change the stage, gate, or control block — this is a read-only convenience.";
-      const ok = await sendPrompt(prompt, "review-local", ctxFor(s, { prNumber: prNo || null }));
+      const ok = await sendIntent("review-local", { prNumber: prNo || null }, ctxFor(s));
       if (ok) toast("Opening the PR in a session…");
       // Re-enable either way: REVIEW-LOCAL changes no durable state, so a poll
       // won't re-render this button — and it is idempotent (open_pr_session
@@ -1335,12 +1396,7 @@ function renderFeedback(s, readOnly) {
     if ($("shipBtn").disabled) return; // fail-closed: PR missing or head moved
     const note = ($("revFb").value || "").trim();
     $("shipBtn").disabled = true; $("reviseBtn").disabled = true;
-    let prompt = "[AGENT-LOOP · SHIP] Issue #" + s.issue + ". The human approved PR #" + (prNo || "?") + " at the reviewed " +
-      "head commit (headSha in the AL-CTX marker). Follow the embedded playbook's Feedback/SHIP recipe: validate the PR " +
-      "head still equals that headSha (if it moved, re-open the feedback gate instead), then move to stage:finalizing and " +
-      "run the finalize subagent on the SAME branch/PR through to done.";
-    if (note) prompt += " The human added finalize notes:\\n\\n\\"\\"\\"\\n" + note + "\\n\\"\\"\\"";
-    const ok = await sendPrompt(prompt, "ship", ctxFor(s, { prNumber: prNo || null }));
+    const ok = await sendIntent("ship", { prNumber: prNo || null, reviewedHeadSha: lastReviewedHeadSha || (impl && impl.headSha) || null, notes: note }, ctxFor(s));
     if (ok) toast("Shipping — finalizing the PR.");
     else { $("shipBtn").disabled = !shipReviewable; $("reviseBtn").disabled = false; }
   };
@@ -1348,11 +1404,7 @@ function renderFeedback(s, readOnly) {
     const fb = ($("revFb").value || "").trim();
     if (!fb) { $("revFb").focus(); toast("Add the changes you want before requesting a revision."); return; }
     $("shipBtn").disabled = true; $("reviseBtn").disabled = true;
-    const prompt = "[AGENT-LOOP · REVISE] Issue #" + s.issue + ". The human wants changes to PR #" + (prNo || "?") + ":\\n\\n\\"\\"\\"\\n" + fb +
-      "\\n\\"\\"\\"\\n\\nFollow the embedded playbook's Feedback/REVISE recipe: post this feedback as an AL-IN comment, bump " +
-      "impl-round, and run the implement subagent again with the feedback comment id in pending.inputCommentIds on the SAME " +
-      "deterministic branch/PR (never open a new branch or PR), then re-open the feedback gate.";
-    const ok = await sendPrompt(prompt, "revise", ctxFor(s, { prNumber: prNo || null }));
+    const ok = await sendIntent("revise", { prNumber: prNo || null, feedback: fb }, ctxFor(s));
     if (ok) toast("Sent — revising the PR.");
     else { $("shipBtn").disabled = false; $("reviseBtn").disabled = false; }
   };
@@ -1415,6 +1467,7 @@ function render(s) {
   const usingLast = errored && !!sameJob;
   const view = usingLast ? lastGoodState : s;
   lastState = view;
+  if (view.active) idleBuildGen++;
   // Once a job is active, retire the kickoff nonce so a future new idea gets a
   // fresh reqId and can't accidentally adopt this issue. Retries while still
   // idle keep reusing the same nonce (it's only cleared on an active state).
