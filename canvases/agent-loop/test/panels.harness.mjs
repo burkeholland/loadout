@@ -40,11 +40,15 @@ function run(state, commentBody, opts) {
       return { ok: okPost, status: okPost ? 200 : 502, json: async () => ({ ok: okPost }) };
     }
     if (url === "/pr" && opts.prHttpFail) return { ok: false, status: 502, json: async () => ({}) };
+    if (url === "/issues" && opts.issuesHttpFail) {
+      return { ok: false, status: 502, json: async () => ({ error: "discovery unavailable" }) };
+    }
     return {
       ok: true, status: 200,
       json: async () => {
-        if (url === "/state") return state;
+        if (url === "/state") return opts.statePayload || state;
         if (url === "/pr") return opts.prSnapshot || {};
+        if (url === "/issues") return opts.issuesPayload || { owner: "o", repo: "r", issues: [] };
         if (url.startsWith("/comment/")) return { body: commentBody || "## Heading\nbody" };
         return {};
       },
@@ -111,11 +115,11 @@ assert("questionnaire last step shows Submit", out.includes("Question 3 of 3") &
 r.el("qtext").value = "Toast + aria-live";
 r.el("qtext").oninput();
 await r.el("answersBtn").onclick();
-const answersPost = r.posts.find((p) => p.url === "/prompt");
-assert("answers POST emits AL-CTX marker", !!answersPost && /<!-- AL-CTX \{.*"txn":3.*\} -->/.test(answersPost.body.prompt));
-assert("answers POST carries the single-select choice", !!answersPost && answersPost.body.prompt.includes("q1. Which framework?\n> React"));
-assert("answers POST carries the multi-select choices", !!answersPost && answersPost.body.prompt.includes("\u201cMin/max\u201d, \u201cDisabled\u201d"));
-assert("answers POST carries the free-text note", !!answersPost && answersPost.body.prompt.includes("Toast + aria-live"));
+const answersPost = r.posts.find((p) => p.url === "/intent");
+assert("answers POST is structured /intent", !!answersPost && answersPost.body.kind === "answers" && answersPost.body.expectedTxn === 3);
+assert("answers POST carries the single-select choice", !!answersPost && answersPost.body.data.answers[0].answer === "React");
+assert("answers POST carries the multi-select choices", !!answersPost && answersPost.body.data.answers[1].answer.includes("\u201cMin/max\u201d") && answersPost.body.data.answers[1].answer.includes("\u201cDisabled\u201d"));
+assert("answers POST carries the free-text note", !!answersPost && answersPost.body.data.answers[2].answer.includes("Toast + aria-live"));
 
 // Plan-review gate
 out = run({ ...base, stage: "planning-finalize", gate: "plan-review", status: "waiting",
@@ -133,17 +137,55 @@ assert("feedback has ship + revise", out.includes('id="shipBtn"') && out.include
 assert("feedback shows PR link", out.includes("http://x/pull/42") && out.includes("#42"));
 await tick();
 await r.el("shipBtn").onclick();
-const shipPost = r.posts.find((p) => p.url === "/prompt");
-assert("ship POST emits AL-CTX + kind", !!shipPost && shipPost.body.kind === "ship" && /AL-CTX/.test(shipPost.body.prompt));
+const shipPost = r.posts.find((p) => p.url === "/intent");
+assert("ship POST emits structured kind", !!shipPost && shipPost.body.kind === "ship" && shipPost.body.expectedTxn === 3);
 
 // Kickoff (idle) emits a reqId nonce
 r = run({ active: false });
 out = r.html;
 assert("idle renders idea box", out.includes('id="idea"') && out.includes('id="startBtn"'));
+assert("idle defaults to Existing builds with New build one tab away",
+  out.includes('class="idle-tab active" id="existingTab"') && out.includes('id="newPane" role="tabpanel" hidden'));
 r.el("idea").value = "A tooltip component";
 await r.el("startBtn").onclick();
-const kfPost = r.posts.find((p) => p.url === "/prompt");
-assert("kickoff POST emits reqId in AL-CTX", !!kfPost && /"reqId":"kf-/.test(kfPost.body.prompt));
+const kfPost = r.posts.find((p) => p.url === "/intent");
+assert("kickoff POST emits reqId in structured data", !!kfPost && kfPost.body.kind === "kickoff" && /^kf-/.test(kfPost.body.data.reqId));
+
+const issuesPayload = { owner: "o", repo: "r", issues: [
+  { number: 2, title: "First build", updatedAt: new Date().toISOString(), labels: ["agent-loop", "stage:prototype"] },
+  { number: 1, title: "SQLite canvas", updatedAt: new Date(Date.now() - 3600000).toISOString(), labels: ["agent-loop", "gate:signoff"] },
+] };
+r = run({ active: false }, null, { issuesPayload });
+assert("existing-build list starts in a local loading state", r.html.includes("Loading existing builds"));
+await tick();
+assert("existing-build list renders repository issues", r.el("buildList")._html.includes("First build") &&
+  r.el("buildList")._html.includes("SQLite canvas"));
+r.el("buildSearch").value = "sqlite";
+r.el("buildSearch").oninput();
+assert("existing-build search filters title and issue number", !r.el("buildList")._html.includes("First build") &&
+  r.el("buildList")._html.includes("SQLite canvas"));
+await r.el("buildIssue_1").onclick();
+const openExisting = r.posts.find((p) => p.url === "/intent" && p.body.kind === "open-existing");
+assert("existing-build selection sends only structured bind routing", !!openExisting &&
+  openExisting.body.owner === "o" && openExisting.body.repo === "r" && openExisting.body.issue === 1 &&
+  Object.keys(openExisting.body.data).length === 0);
+
+r = run({ active: false }, null, { issuesPayload: { owner: "o", repo: "r", issues: [] } });
+await tick();
+assert("empty existing-build list is explicit", r.el("buildList")._html.includes("No open Agent Loop builds yet"));
+
+r = run({ active: false }, null, { issuesHttpFail: true });
+await tick();
+assert("issue discovery failure stays local to the launcher", r.el("buildStatus")._html.includes("Starting a new build is still available") &&
+  r.el("panel")._html.includes('id="startBtn"'));
+
+r = run({ active: false }, null, {
+  issuesPayload,
+  statePayload: { ...base, stage: "research", gate: null, status: "working" },
+});
+await tick();
+assert("late issue discovery cannot repaint an active job", !r.el("panel")._html.includes("Existing builds") &&
+  r.el("panel")._html.includes("spinner"));
 
 // Pending lock (a child still working while a gate is nominally open): the
 // stepper is withheld entirely — no way to submit until the child returns.
@@ -216,7 +258,7 @@ assert("job switch mid-outage banner omits last-known claim", !/last known state
 
 // --- Blocker-fix coverage (Sol Phase-3 review) -------------------------------
 
-// (1) A failed /prompt POST must NOT report success and must re-enable buttons.
+// (1) A failed /intent POST must NOT report success and must re-enable buttons.
 r = run({ ...base, stage: "implementing", gate: "feedback", status: "waiting",
   impl: { commentId: 12, prNumber: 42, prUrl: "http://x/pull/42" } }, null,
   { failPost: true, prSnapshot: { available: true, reviewable: true, owner: "o", repo: "r", issue: 7, prNumber: 42, checks: { state: "passed" }, changedFiles: 1,
@@ -234,28 +276,28 @@ out = run({ ...base, stage: "prototype", gate: "signoff", status: "waiting",
 assert("signoff gate disables approve when pending", /id="approveBtn"[^>]*disabled/.test(out));
 assert("signoff gate disables refine when pending", /id="refineBtn"[^>]*disabled/.test(out));
 
-// (3) SHIP/REVISE AL-CTX carries prNumber for machine-readable PR correlation.
+// (3) SHIP/REVISE structured intent carries prNumber for machine-readable PR correlation.
 r = run({ ...base, stage: "implementing", gate: "feedback", status: "waiting",
   impl: { commentId: 12, prNumber: 42, prUrl: "http://x/pull/42" } }, null,
   { prSnapshot: { available: true, reviewable: true, owner: "o", repo: "r", issue: 7, prNumber: 42, checks: { state: "passed" }, changedFiles: 1,
     files: [{ path: "a.js", status: "modified", additions: 1, deletions: 0, patch: "@@ -1 +1 @@\n+x", noPatch: false }] } });
 await tick();
 await r.el("shipBtn").onclick();
-const shipCtx = r.posts.find((p) => p.url === "/prompt");
-assert("ship AL-CTX carries prNumber", !!shipCtx && /"prNumber":42/.test(shipCtx.body.prompt));
+const shipCtx = r.posts.find((p) => p.url === "/intent");
+assert("ship intent carries prNumber", !!shipCtx && shipCtx.body.data.prNumber === 42);
 
 // (4) Kickoff nonce is retired once an active state is observed, so a later
 //     unrelated kickoff gets a FRESH reqId (can't adopt the prior issue).
 r = run({ active: false });
 r.el("idea").value = "First idea";
 await r.el("startBtn").onclick();
-const req1 = (r.posts.find((p) => p.url === "/prompt").body.prompt.match(/"reqId":"(kf-[^"]+)"/) || [])[1];
+const req1 = r.posts.find((p) => p.url === "/intent").body.data.reqId;
 r.render({ ...base, stage: "research", gate: null, status: "working" }); // active observed → nonce cleared
 r.render({ active: false }); // back to idle for a brand-new idea
 r.el("idea").value = "Second, unrelated idea";
 await r.el("startBtn").onclick();
-const posts2 = r.posts.filter((p) => p.url === "/prompt");
-const req2 = (posts2[posts2.length - 1].body.prompt.match(/"reqId":"(kf-[^"]+)"/) || [])[1];
+const posts2 = r.posts.filter((p) => p.url === "/intent");
+const req2 = posts2[posts2.length - 1].body.data.reqId;
 assert("kickoff nonce cleared after active — fresh reqId for a new idea", !!req1 && !!req2 && req1 !== req2);
 
 // --- mdLite block rendering (plan/build/research readability) -----------------
@@ -294,7 +336,7 @@ await tick();
 assert("feedback disables Ship when reviewed head moved", f.el("shipBtn").disabled === true);
 assert("feedback shows head-moved warning", /moved since you last reviewed/.test(f.el("prReview")._html));
 await f.el("shipBtn").onclick();
-assert("disabled Ship does not POST", !f.posts.some((p) => p.url === "/prompt"));
+assert("disabled Ship does not POST", !f.posts.some((p) => p.url === "/intent"));
 
 // (c) Reviewable snapshot → files + CI render; Ship stays enabled and posts.
 f = run({ ...base, stage: "implementing", gate: "feedback", status: "waiting",
@@ -308,7 +350,7 @@ assert("feedback renders diff add/del lines", /diff-add/.test(f.el("prReview")._
 assert("feedback shows passing CI badge", /Checks passing/.test(f.el("prReview")._html));
 assert("reviewable Ship stays enabled", f.el("shipBtn").disabled === false);
 await f.el("shipBtn").onclick();
-assert("reviewable Ship POSTs ship", f.posts.some((p) => p.url === "/prompt" && p.body.kind === "ship"));
+assert("reviewable Ship POSTs ship", f.posts.some((p) => p.url === "/intent" && p.body.kind === "ship"));
 
 // (d) noPatch file renders as binary/unavailable, never as an empty diff.
 f = run({ ...base, stage: "implementing", gate: "feedback", status: "waiting",
@@ -338,7 +380,7 @@ f = run({ ...base, owner: "o", repo: "r", issue: 7, stage: "implementing", gate:
 await tick();
 assert("snapshot missing identity keeps Ship disabled (fail-closed)", f.el("shipBtn").disabled === true);
 await f.el("shipBtn").onclick();
-assert("snapshot missing identity does not POST ship", !f.posts.some((p) => p.url === "/prompt"));
+assert("snapshot missing identity does not POST ship", !f.posts.some((p) => p.url === "/intent"));
 
 // (e) available:false snapshot is fail-closed: Ship never enables, and a click is a no-op.
 f = run({ ...base, stage: "implementing", gate: "feedback", status: "waiting",
@@ -347,7 +389,7 @@ f = run({ ...base, stage: "implementing", gate: "feedback", status: "waiting",
 await tick();
 assert("available:false keeps Ship disabled", f.el("shipBtn").disabled === true);
 await f.el("shipBtn").onclick();
-assert("available:false Ship does not POST", !f.posts.some((p) => p.url === "/prompt"));
+assert("available:false Ship does not POST", !f.posts.some((p) => p.url === "/intent"));
 
 // (f) A /pr HTTP failure must leave Ship disabled (fail-closed on read error).
 f = run({ ...base, stage: "implementing", gate: "feedback", status: "waiting",
@@ -386,7 +428,7 @@ assert("plan-review Approve disabled before plan loads", /id="planOkBtn"[^>]*dis
 await tick();
 assert("plan-review Approve enables after plan loads", p.el("planOkBtn").disabled === false);
 await p.el("planOkBtn").onclick();
-assert("plan-review Approve POSTs plan-ok", p.posts.some((x) => x.url === "/prompt" && x.body.kind === "plan-ok"));
+assert("plan-review Approve POSTs plan-ok", p.posts.some((x) => x.url === "/intent" && x.body.kind === "plan-ok"));
 
 // --- "Try it out" hands-on preview at the feedback gate ---------------------
 
@@ -423,12 +465,10 @@ r = run({ ...base, stage: "implementing", gate: "feedback", status: "waiting",
   impl: { commentId: 12, prNumber: 42, prUrl: "http://x/pull/42", branch: "agent-loop/issue-7",
     preview: { kind: "web", path: "o/r/7/impl-round-1/demo/" } } });
 await r.el("reviewLocalBtn").onclick();
-const rlPost = r.posts.find((p) => p.url === "/prompt" && p.body.kind === "review-local");
+const rlPost = r.posts.find((p) => p.url === "/intent" && p.body.kind === "review-local");
 assert("review-local click POSTs kind review-local", !!rlPost);
-assert("review-local prompt names the PR and branch",
-  !!rlPost && /REVIEW-LOCAL/.test(rlPost.body.prompt) && rlPost.body.prompt.includes("#42") &&
-  rlPost.body.prompt.includes("agent-loop/issue-7"));
-assert("review-local AL-CTX carries prNumber", !!rlPost && /"prNumber":42/.test(rlPost.body.prompt));
+assert("review-local intent carries the PR number", !!rlPost && rlPost.body.data.prNumber === 42);
+assert("review-local intent is routed to the issue", !!rlPost && rlPost.body.owner === "o" && rlPost.body.repo === "r" && rlPost.body.issue === 7);
 assert("review-local button stays repeatable after a successful click", r.el("reviewLocalBtn").disabled === false);
 
 // (m) Branch falls back to the deterministic name when impl.branch is absent.

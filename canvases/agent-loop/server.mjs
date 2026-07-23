@@ -9,8 +9,10 @@ import { existsSync } from "node:fs";
 import { join, normalize, extname, sep } from "node:path";
 import { homedir } from "node:os";
 import { renderHtml } from "./webview.mjs";
+import * as GitHub from "./github.mjs";
 import { getIssue, listComments, getComment, getPull, getPullHead, getPullFiles, findControlBlock, findCommentByHeading, findPrototypeComments, findQuestionnaireComment, findBuildReadyComment } from "./github.mjs";
 import { buildSnapshot } from "./pr.mjs";
+import { createCoordinator } from "./workflow.mjs";
 
 export const DATA_ROOT = join(homedir(), ".agent-loop");
 export const ACTIVE_FILE = join(DATA_ROOT, "active.json");
@@ -86,8 +88,8 @@ function labelNames(issue) {
 }
 
 // Build the issue-authoritative read model consumed by the webview.
-export async function buildState() {
-  const active = await readActive();
+export async function buildState(target = null) {
+  const active = target || await readActive();
   if (!active) return { active: false };
   const { owner, repo, issue } = active;
   try {
@@ -237,8 +239,8 @@ export function deriveState({ owner, repo, issue, iss, comments }) {
 // is volatile: putting it in the 4s poll would thrash the gate panel and wipe
 // in-progress feedback text. The PR is resolved from the ACTIVE issue's derived
 // state — the client never supplies owner/repo/number.
-export async function buildPrSnapshot() {
-  const state = await buildState();
+export async function buildPrSnapshot(target = null) {
+  const state = await buildState(target);
   if (!state || !state.active) return { available: false, reason: "no-active-issue" };
   const { owner, repo, issue } = state;
   const impl = state.impl || null;
@@ -305,12 +307,25 @@ async function serveWork(urlPath, res, scopeRoot) {
   }
 }
 
-// Start a loopback HTTP server. `deps.onPrompt(prompt, kind)` is called for
-// POST /prompt; `deps.log` is optional. Returns { server, clients, url }.
+// Start a loopback HTTP server. POST /intent sends structured human intent to
+// the deterministic workflow coordinator; arbitrary UI-authored prompts are not
+// accepted.
 export async function startServer(deps = {}) {
   if (!existsSync(DATA_ROOT)) await mkdir(DATA_ROOT, { recursive: true });
   if (!existsSync(WORK_ROOT)) await mkdir(WORK_ROOT, { recursive: true });
   const clients = new Set();
+  let active = Object.hasOwn(deps, "active") ? deps.active : await readActive();
+  const readBoundActive = async () => active;
+  const setBoundActive = async (owner, repo, issue) => {
+    active = { owner, repo, issue };
+    await setActive(owner, repo, issue);
+  };
+  const buildBoundState = async () => active
+    ? (deps.buildState || buildState)(active)
+    : { active: false };
+  const buildBoundPrSnapshot = async () => active
+    ? (deps.buildPrSnapshot || buildPrSnapshot)(active)
+    : { available: false, reason: "no-active-issue" };
 
   // Per-server capability token. Embedded only in the top-level document, so a
   // sandboxed prototype iframe (opaque origin) can't read it and therefore can't
@@ -340,7 +355,7 @@ export async function startServer(deps = {}) {
   // Prototype assets are served from a SEPARATE token-less loopback origin. A
   // popped-out prototype opens as a real (non-sandboxed) browser tab; keeping it
   // cross-origin from the control server means its JS cannot read the capability
-  // token from `/` (blocked by the same-origin policy) nor POST /prompt (403
+  // token from `/` (blocked by the same-origin policy) nor POST /intent (403
   // cross-origin). This origin serves ONLY /work/* for the ACTIVE issue — it has
   // no token document and no privileged routes to reach.
   let assetPort = 0;
@@ -349,10 +364,11 @@ export async function startServer(deps = {}) {
       if (!hostAllowed(req, assetPort)) { res.writeHead(403); res.end("Forbidden host"); return; }
       const url = new URL(req.url || "/", "http://127.0.0.1");
       if (req.method === "GET" && url.pathname.startsWith("/work/")) {
-        // Scope every asset read to the active owner/repo/issue subtree so a
+        // Scope every asset read to this canvas instance's owner/repo/issue
+        // subtree so a
         // popped-out prototype can't fetch sibling issues' work dirs and exfil
-        // them. (Prototypes are only ever linked for the active issue anyway.)
-        const active = await readActive();
+        // them.
+        const active = await readBoundActive();
         if (!active) { res.writeHead(404); res.end("Not found"); return; }
         const scopeRoot = join(WORK_ROOT, String(active.owner), String(active.repo), String(active.issue));
         await serveWork(url.pathname, res, scopeRoot);
@@ -365,6 +381,22 @@ export async function startServer(deps = {}) {
   const aAddr = assetServer.address();
   assetPort = typeof aAddr === "object" && aAddr ? aAddr.port : 0;
   const assetBase = `http://127.0.0.1:${assetPort}`;
+  let serverEntry = null;
+  const github = deps.github || {
+    ...GitHub,
+    detectRepo: () => GitHub.detectRepo(deps.workingDirectory),
+  };
+  const coordinator = deps.coordinator || createCoordinator({
+    github,
+    sendPrompt: deps.sendPrompt || deps.onPrompt || (async () => {}),
+    setActive: setBoundActive,
+    readActive: readBoundActive,
+    workRoot: WORK_ROOT,
+    assetBase,
+    instanceId: deps.instanceId || "agent-loop",
+    openPrSession: deps.openPrSession,
+    refresh: async () => { if (serverEntry) broadcastRefresh(serverEntry); },
+  });
 
   const server = createServer(async (req, res) => {
     try {
@@ -386,7 +418,17 @@ export async function startServer(deps = {}) {
         return;
       }
       if (req.method === "GET" && path === "/state") {
-        sendJson(res, 200, await buildState());
+        sendJson(res, 200, await buildBoundState());
+        return;
+      }
+      if (req.method === "GET" && path === "/issues") {
+        try {
+          const repoInfo = await github.detectRepo();
+          const issues = (await github.listAgentLoopIssues(repoInfo.owner, repoInfo.repo, { limit: 5 })).slice(0, 5);
+          sendJson(res, 200, { owner: repoInfo.owner, repo: repoInfo.repo, issues });
+        } catch (e) {
+          sendJson(res, 502, { error: String(e.message || e) });
+        }
         return;
       }
       if (req.method === "GET" && path === "/events") {
@@ -399,7 +441,7 @@ export async function startServer(deps = {}) {
       if (req.method === "GET" && path.startsWith("/comment/")) {
         const id = path.slice("/comment/".length);
         if (!/^\d+$/.test(id)) { sendJson(res, 400, { error: "invalid comment id" }); return; }
-        const active = await readActive();
+        const active = await readBoundActive();
         if (!active) { sendJson(res, 404, { error: "no active issue" }); return; }
         try {
           const c = await getComment(active.owner, active.repo, id, active.issue);
@@ -419,7 +461,7 @@ export async function startServer(deps = {}) {
         return;
       }
       if (req.method === "GET" && path === "/pr") {
-        sendJson(res, 200, await buildPrSnapshot());
+        sendJson(res, 200, await buildBoundPrSnapshot());
         return;
       }
       if (req.method === "GET" && path === "/prototype") {
@@ -437,13 +479,12 @@ export async function startServer(deps = {}) {
         catch (e) { sendJson(res, 502, { ok: false, error: String(e.message || e) }); }
         return;
       }
-      if (req.method === "POST" && path === "/prompt") {
+      if (req.method === "POST" && path === "/intent") {
         const body = await readBody(req);
-        const prompt = typeof body.prompt === "string" ? body.prompt : "";
-        if (!prompt.trim()) { sendJson(res, 400, { ok: false, error: "empty prompt" }); return; }
+        if (!body || typeof body.kind !== "string") { sendJson(res, 400, { ok: false, error: "intent kind is required" }); return; }
         try {
-          await deps.onPrompt?.(prompt, body.kind || "prompt");
-          sendJson(res, 200, { ok: true });
+          const out = await coordinator.handleIntent(body);
+          sendJson(res, 200, { ok: true, result: out });
         } catch (e) {
           sendJson(res, 502, { ok: false, error: String(e.message || e) });
         }
@@ -459,7 +500,12 @@ export async function startServer(deps = {}) {
   const addr = server.address();
   const port = typeof addr === "object" && addr ? addr.port : 0;
   mainPort = port;
-  return { server, assetServer, clients, url: `http://127.0.0.1:${port}/`, assetBase, token };
+  serverEntry = {
+    server, assetServer, clients, url: `http://127.0.0.1:${port}/`, assetBase,
+    token, coordinator, readActive: readBoundActive, setActive: setBoundActive,
+    buildState: buildBoundState, buildPrSnapshot: buildBoundPrSnapshot,
+  };
+  return serverEntry;
 }
 
 export function broadcastRefresh(entry) {

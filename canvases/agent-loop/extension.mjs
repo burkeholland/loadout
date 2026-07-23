@@ -1,10 +1,7 @@
 // Agent Loop canvas — human-in-the-loop, multi-agent build loop.
 //
-// ROLE: this canvas is the INTERFACE ONLY. It never conducts the loop.
-//   • It READS GitHub for free (via `gh api`) to show where the job is.
-//   • It sends genuine work to the ORCHESTRATOR session via session.send({prompt}).
-//   • The orchestrator owns ALL mutations (issue comments, control block, labels)
-//     and pushes a `refresh` nudge here after each transition.
+// ROLE: this extension conducts deterministic workflow state transitions. Agents
+// receive exact work orders and submit generated assets back through submit_stage.
 //
 // State is issue-authoritative: the collapsed AGENT-LOOP-STATE control-block
 // comment is the machine-readable read model. The webview polls /state (which
@@ -12,10 +9,9 @@
 
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 import {
-  startServer, buildState, broadcastRefresh, setActive,
-  DATA_ROOT, ACTIVE_FILE, WORK_ROOT,
+  startServer, broadcastRefresh,
 } from "./server.mjs";
-import { PLAYBOOK } from "./playbook.mjs";
+import { createAgentLoopActions } from "./actions.mjs";
 
 const CANVAS_ID = "agent-loop";
 
@@ -27,62 +23,11 @@ function refreshAll(instanceId) {
   else for (const e of servers.values()) broadcastRefresh(e);
 }
 
-// ─── Canvas actions (orchestrator → canvas) ──────────────────────────────────
+// ─── Canvas actions (agent/UI → deterministic coordinator) ───────────────────
 // NOTE: each action keeps its `handler`. It is passed straight to createCanvas,
 // which strips the metadata for the wire and dispatches `canvas.action.invoke`
 // in-process. Do NOT strip handlers before handing actions to createCanvas.
-const actions = [
-  {
-    name: "refresh",
-    description: "Nudge the Agent Loop canvas to re-read issue state after a transition. Call after posting a comment, updating the control block, or changing labels.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    handler: async (ctx) => {
-      refreshAll(ctx && ctx.instanceId);
-      return { ok: true };
-    },
-  },
-  {
-    name: "get_state",
-    description: "Return the current Agent Loop read model (parsed control block + labels) for the active issue.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    handler: async () => buildState(),
-  },
-  {
-    name: "get_config",
-    description: "Return the fixed on-disk paths the orchestrator must use: the active-job pointer file and the prototype working root.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    handler: async () => ({ dataRoot: DATA_ROOT, activeFile: ACTIVE_FILE, workRoot: WORK_ROOT }),
-  },
-  {
-    name: "get_playbook",
-    description: "Return the full Agent Loop conductor playbook (state machine, tick algorithm, guardrails, stage playbooks) that the orchestrator must follow. The playbook is embedded in the canvas — the orchestrator relies on this, never on a file in the target repo.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    handler: async () => ({ playbook: PLAYBOOK }),
-  },
-  {
-    name: "set_active",
-    description: "Point the canvas at the issue the orchestrator is working on, so the canvas stays in sync. Writes the active-job pointer, nudges a refresh, and returns the fresh read model.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        owner: { type: "string" },
-        repo: { type: "string" },
-        issue: { type: "number" },
-      },
-      required: ["owner", "repo", "issue"],
-      additionalProperties: false,
-    },
-    handler: async (ctx) => {
-      const { owner, repo, issue } = (ctx && ctx.input) || {};
-      if (!owner || !repo || !issue) {
-        return { ok: false, error: "owner, repo and issue are all required" };
-      }
-      await setActive(owner, repo, issue);
-      refreshAll(ctx && ctx.instanceId);
-      return { ok: true, state: await buildState() };
-    },
-  },
-];
+const actions = createAgentLoopActions({ servers, refreshAll });
 
 const agentLoopCanvas = createCanvas({
   id: CANVAS_ID,
@@ -98,19 +43,23 @@ const agentLoopCanvas = createCanvas({
   actions,
   open: async (ctx) => {
     const input = (ctx && ctx.input) || {};
-    if (input.owner && input.repo && input.issue) {
-      await setActive(input.owner, input.repo, input.issue);
-    }
+    const target = input.owner && input.repo && input.issue
+      ? { owner: input.owner, repo: input.repo, issue: input.issue }
+      : null;
     let entry = servers.get(ctx.instanceId);
     if (!entry) {
       entry = await startServer({
-        onPrompt: async (prompt, kind) => {
+        instanceId: ctx.instanceId,
+        workingDirectory: ctx.session && ctx.session.workingDirectory,
+        ...(target ? { active: target } : {}),
+        sendPrompt: async (prompt, kind) => {
           await session.send({ prompt });
-          await session.log("Agent Loop canvas → orchestrator: " + kind, { ephemeral: true });
+          await session.log("Agent Loop work order → agent: " + kind, { ephemeral: true });
         },
       });
       servers.set(ctx.instanceId, entry);
     }
+    if (target) await entry.setActive(target.owner, target.repo, target.issue);
     return { title: "Agent Loop", url: entry.url };
   },
   onClose: async (ctx) => {

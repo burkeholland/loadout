@@ -5,7 +5,7 @@ import { deriveState } from "../server.mjs";
 import {
   parseControlBlock, findControlBlock, parseQuestionnaire,
   findBuildReadyComment, findPrototypeComments, isDegradedError,
-  STATE_SENTINEL,
+  normalizeAgentLoopIssues, STATE_SENTINEL,
 } from "../github.mjs";
 import { summarizeChecks, boundFiles, buildSnapshot } from "../pr.mjs";
 
@@ -29,6 +29,23 @@ test("parseControlBlock extracts JSON body", () => {
   const d = parseControlBlock(c.body);
   assert.equal(d.txn, 3);
   assert.equal(d.stage, "prototype");
+});
+
+test("normalizeAgentLoopIssues keeps five newest open labeled issues", () => {
+  const raw = [
+    { number: 1, title: "Old", state: "open", updated_at: "2026-01-01", html_url: "u1", labels: [{ name: "agent-loop" }] },
+    { number: 2, title: "Closed", state: "closed", updated_at: "2026-07-01", html_url: "u2", labels: [{ name: "agent-loop" }] },
+    { number: 3, title: "PR", state: "open", updated_at: "2026-07-02", html_url: "u3", pull_request: {}, labels: [{ name: "agent-loop" }] },
+    { number: 4, title: "Ordinary", state: "open", updated_at: "2026-07-03", html_url: "u4", labels: [] },
+    ...Array.from({ length: 6 }, (_, i) => ({
+      number: 10 + i, title: `Build ${i}`, state: "open", updated_at: `2026-07-${10 + i}`,
+      html_url: `u${10 + i}`, labels: [{ name: "agent-loop" }, { name: i ? "stage:planning" : "gate:signoff" }],
+    })),
+  ];
+  const out = normalizeAgentLoopIssues(raw, 5);
+  assert.deepEqual(out.map((issue) => issue.number), [15, 14, 13, 12, 11]);
+  assert.deepEqual(out[4].labels, ["agent-loop", "stage:planning"]);
+  assert.equal(out[0].updatedAt, "2026-07-15");
 });
 
 test("parseControlBlock returns null on malformed JSON", () => {
