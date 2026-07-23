@@ -29,9 +29,9 @@ read, what asset to produce, and to call:
 
 via `submit_stage` on the already-open canvas instance.
 
-Each open canvas server is bound to its own issue. `active.json` is only the
-default used by a newly opened instance, so another canvas cannot retarget an
-existing window.
+Each newly opened canvas starts unbound at the launcher, even when `active.json`
+points to a previous workflow. Selecting or starting a build binds only that
+canvas server, so another canvas cannot retarget an existing window.
 
 Agents inherit the user's repository credentials and therefore remain a trusted
 asset generator. The coordinator rejects workflow markers and control fields in

@@ -172,7 +172,7 @@ try {
 }
 
 // Each server is permanently bound to its own issue even when another canvas
-// instance updates the global default pointer.
+// instance updates the compatibility pointer. New servers always start unbound.
 const stateFor = async (target) => target ? { active: true, ...target } : { active: false };
 let bindingBackup = null;
 try { bindingBackup = await readFile(ACTIVE_FILE, "utf8"); } catch {}
@@ -187,7 +187,7 @@ try {
   ok("canvas B follows only its own explicit rebind", stateB.json.issue === 43);
   canvasDefault = await startServer({ buildState: stateFor, coordinator: { handleIntent: async () => ({ ok: true }) } });
   const defaultState = await req(canvasDefault.url.replace(/\/$/, ""), "/state", { token: canvasDefault.token });
-  ok("new canvas adopts active.json as its initial binding", defaultState.json.issue === 43);
+  ok("new canvas ignores active.json and opens unbound", defaultState.json.active === false);
   canvasIdle = await startServer({ active: null, buildState: stateFor, coordinator: { handleIntent: async () => ({ ok: true }) } });
   const idleState = await req(canvasIdle.url.replace(/\/$/, ""), "/state", { token: canvasIdle.token });
   ok("explicitly unbound canvas is consistently idle", idleState.json.active === false);

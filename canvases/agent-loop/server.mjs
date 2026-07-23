@@ -314,7 +314,10 @@ export async function startServer(deps = {}) {
   if (!existsSync(DATA_ROOT)) await mkdir(DATA_ROOT, { recursive: true });
   if (!existsSync(WORK_ROOT)) await mkdir(WORK_ROOT, { recursive: true });
   const clients = new Set();
-  let active = Object.hasOwn(deps, "active") ? deps.active : await readActive();
+  // New canvas instances always start at the launcher. A caller may explicitly
+  // bind an issue, but the process-wide compatibility pointer is never adopted
+  // implicitly.
+  let active = Object.hasOwn(deps, "active") ? deps.active : null;
   const readBoundActive = async () => active;
   const setBoundActive = async (owner, repo, issue) => {
     active = { owner, repo, issue };
