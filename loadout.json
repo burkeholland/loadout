@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "skills": [
+    {
+      "name": "issue",
+      "path": "skills/issue"
+    },
+    {
+      "name": "postrboard",
+      "path": "skills/postrboard"
+    }
+  ],
+  "extensions": [
+    {
+      "name": "agent-loop",
+      "type": "canvas",
+      "path": "canvases/agent-loop"
+    },
+    {
+      "name": "sqlite",
+      "type": "canvas",
+      "path": "canvases/sqlite"
+    }
+  ]
+}

@@ -8,23 +8,13 @@ actions (`open`, `query`, `preview`, …).
 
 ## Install
 
-From the loadout repo root (junction into your user extensions dir):
+Install the canvas from GitHub with the Copilot app:
 
-```bash
-node scripts/install-canvases.mjs --only sqlite
-```
-
-Or promote a detached copy:
-
-```bash
-node scripts/install-canvases.mjs --only sqlite --copy --force
-```
-
-Or point Copilot's `install_extension` at this folder:
-
-```
+```text
 install_extension url:https://github.com/burkeholland/loadout/tree/main/canvases/sqlite scope:user
 ```
+
+Use `scope:project` to install it into the current project instead.
 
 Reload extensions (or restart the session). The **SQLite** canvas becomes available.
 

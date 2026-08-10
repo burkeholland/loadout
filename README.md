@@ -1,58 +1,83 @@
 # loadout
 
-A loadout of shareable **GitHub Copilot** capabilities — canvases, skills, and custom agents you
-can drop into any project.
+A loadout of shareable GitHub Copilot skills and canvas extensions.
 
-Everything here is self-contained. Grab a single folder; nothing depends on the repo root.
+## Allowlist
 
-## Artifacts
+[`loadout.json`](loadout.json) is the explicit allowlist of shareable assets in
+this repository. The canonical installers below use the individual asset paths.
 
-| Artifact | Type | What it does | Install |
-| --- | --- | --- | --- |
-| [`agent-loop`](canvases/agent-loop) | Canvas | Human-in-the-loop, multi-agent build loop (kickoff → research → prototype → sign-off → …) rendered as an in-app canvas, backed by a GitHub issue. | `install_extension` (see below) |
-| [`sqlite`](canvases/sqlite) | Canvas | Browse local SQLite databases — tables/schema, row preview, SQL runner (reads + writes). | `node scripts/install-canvases.mjs --only sqlite` or `install_extension` |
-| [`postrboard`](skills/postrboard) | Skill | Applies the Postrboard design language to frontend work — quiet CSS for loud products; restrained, code-native, non-generic. | Copy folder (see below) |
+| Asset | Type | Purpose |
+| --- | --- | --- |
+| [`skills/issue`](skills/issue) | Skill | Write short, clear GitHub issues. |
+| [`skills/postrboard`](skills/postrboard) | Skill | Apply the Postrboard design language to frontend work. |
+| [`canvases/agent-loop`](canvases/agent-loop) | Canvas | Run a human-controlled build loop backed by a GitHub issue. |
+| [`canvases/sqlite`](canvases/sqlite) | Canvas | Browse SQLite databases and run SQL. |
 
-## Installing by type
+The repository can also contain project-scoped extensions. For example, if
+`.github/extensions/winget-manager` exists, it is a project extension and is
+not installed by this user loadout script.
 
-### Canvases
+## Canonical installs without cloning
 
-**Local (recommended while developing loadout):** junction/symlink canvases into your user
-extensions directory so edits are live:
+Use the official installers when you want a normal user install from GitHub.
+These commands do not need a local `X:\loadout` checkout.
 
-```bash
-node scripts/install-canvases.mjs              # all canvases
-node scripts/install-canvases.mjs --only sqlite
-node scripts/install-canvases.mjs --only sqlite --copy --force   # detached promote
+### GitHub CLI
+
+`gh skill` is in public preview and needs GitHub CLI 2.90.0 or later. Preview a
+skill before you install it:
+
+```powershell
+gh skill preview burkeholland/loadout issue
+gh skill install burkeholland/loadout issue --scope user
+gh skill install burkeholland/loadout postrboard --scope user
 ```
 
-That links `~/.copilot/extensions/<name>` → `canvases/<name>`. Reload extensions afterward.
+### Copilot CLI
 
-**From GitHub:** point the Copilot CLI's `install_extension` at the canvas folder:
+Add a skill source with the command line:
 
+```powershell
+copilot skill add https://github.com/burkeholland/loadout/tree/main/skills/issue
+copilot skill add https://github.com/burkeholland/loadout/tree/main/skills/postrboard
 ```
+
+Inside an active Copilot CLI session, the same operation is available with
+`/skills add <URL|DIRECTORY>`.
+
+### Skills CLI
+
+The optional `skills` CLI supports a symlink install. If it asks for an
+installation method, choose **Symlink** and not **Copy**:
+
+```powershell
+npx skills add burkeholland/loadout `
+  --skill issue --skill postrboard `
+  --global --agent github-copilot
+```
+
+Remote installs are the simple distribution path. They fetch the repository
+content and do not follow later edits in `X:\loadout`.
+
+## Canvas installs
+
+Canvas extensions use the Copilot app's `install_extension` command. The
+`scope:user` install is available in every project. Use `scope:project` for a
+project-scoped extension:
+
+```text
 install_extension url:https://github.com/burkeholland/loadout/tree/main/canvases/sqlite scope:user
+install_extension url:https://github.com/burkeholland/loadout/tree/main/canvases/agent-loop scope:project
 ```
 
-Use `scope:user` to make it available in every project, or `scope:project` to install it into the
-current repo under `.github/extensions/`. Each canvas has its own README with details.
+Plugins are a separate Copilot app package mechanism. An extension under
+`.github/extensions` is project-scoped; it is not a plugin.
 
-### Skills
-
-Copy the skill folder into your personal skills directory:
-
-```
-~/.agents/skills/<name>/
-```
-
-For example, drop `skills/postrboard/` in as `~/.agents/skills/postrboard/`. Reload (or restart)
-Copilot and the skill is available.
-
-### Agents
-
-Copy the agent `.md` file into `.github/agents/` in your repo (or your personal agents directory).
+Reload Copilot extensions or restart the session after a canvas installation.
 
 ## Contributing
 
-Add a new artifact as a self-contained folder under `canvases/`, `skills/`, or `agents/`, give it
-its own README (or front matter, for skills/agents), then add a row to the table above.
+Add a self-contained asset under `skills/` or `canvases/`, add its required
+file, then add its path to `loadout.json`. Do not add an asset to the manifest
+until its source directory and required file are checked in.

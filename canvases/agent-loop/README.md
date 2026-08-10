@@ -5,6 +5,18 @@ issue, comments, labels, and one control-block comment are the durable state.
 The extension owns orchestration; agents only generate assets and submit them
 back through the existing canvas action.
 
+## Install
+
+Install the canvas from GitHub with the Copilot app:
+
+```text
+install_extension url:https://github.com/burkeholland/loadout/tree/main/canvases/agent-loop scope:user
+```
+
+Use `scope:project` to install it into the current project instead.
+
+Reload extensions or restart the session after installation.
+
 ## Flow
 
 `kickoff → research → prototype → sign-off → questionnaire → plan review → implement → feedback → finalize → done`
