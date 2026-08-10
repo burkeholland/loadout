@@ -12,6 +12,7 @@ import {
   startServer, broadcastRefresh,
 } from "./server.mjs";
 import { createAgentLoopActions } from "./actions.mjs";
+import { TARGET_SCHEMA_PROPS, validateGithubTarget } from "./target.mjs";
 
 const CANVAS_ID = "agent-loop";
 
@@ -31,21 +32,17 @@ const actions = createAgentLoopActions({ servers, refreshAll });
 
 const agentLoopCanvas = createCanvas({
   id: CANVAS_ID,
-  displayName: "Agent Loop",
+  displayName: "Flow",
   description: "Human-in-the-loop multi-agent build loop: kickoff → research → prototype → sign-off, backed by a GitHub issue.",
   inputSchema: {
     type: "object",
-    properties: {
-      owner: { type: "string" }, repo: { type: "string" }, issue: { type: "number" },
-    },
+    properties: TARGET_SCHEMA_PROPS,
     additionalProperties: false,
   },
   actions,
   open: async (ctx) => {
     const input = (ctx && ctx.input) || {};
-    const target = input.owner && input.repo && input.issue
-      ? { owner: input.owner, repo: input.repo, issue: input.issue }
-      : null;
+    const target = validateGithubTarget(input, { optional: true });
     let entry = servers.get(ctx.instanceId);
     if (!entry) {
       entry = await startServer({
@@ -54,13 +51,13 @@ const agentLoopCanvas = createCanvas({
         ...(target ? { active: target } : {}),
         sendPrompt: async (prompt, kind) => {
           await session.send({ prompt });
-          await session.log("Agent Loop work order → agent: " + kind, { ephemeral: true });
+          await session.log("Flow work order → agent: " + kind, { ephemeral: true });
         },
       });
       servers.set(ctx.instanceId, entry);
     }
     if (target) await entry.setActive(target.owner, target.repo, target.issue);
-    return { title: "Agent Loop", url: entry.url };
+    return { title: "Flow", url: entry.url };
   },
   onClose: async (ctx) => {
     const entry = servers.get(ctx.instanceId);
@@ -75,4 +72,4 @@ const agentLoopCanvas = createCanvas({
 
 session = await joinSession({ canvases: [agentLoopCanvas] });
 
-await session.log("Agent Loop canvas extension ready.", { ephemeral: true });
+await session.log("Flow canvas extension ready.", { ephemeral: true });

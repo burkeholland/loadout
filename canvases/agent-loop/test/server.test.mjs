@@ -26,6 +26,14 @@ async function req(base, path, { method = "GET", token, headers = {}, body } = {
   return { status: r.status, json };
 }
 
+async function rawReq(base, path, { method = "POST", token, headers = {}, body = "" } = {}) {
+  const h = { ...headers };
+  if (token) h["x-al-cap"] = token;
+  const r = await fetch(base + path, { method, headers: h, body });
+  let json = null; try { json = await r.json(); } catch (e) {}
+  return { status: r.status, json };
+}
+
 const intents = [];
 const entry = await startServer({
   active: null,
@@ -64,6 +72,35 @@ ok("POST /intent with token calls coordinator", intents.length === 1 && intents[
 const promptGone = await req(base, "/prompt", { method: "POST", token, body: { prompt: "hello", kind: "kickoff" } });
 ok("POST /prompt is removed even with token → 404", promptGone.status === 404);
 ok("POST /open without token → 403", (await req(base, "/open", { method: "POST", body: { url: "https://github.com/x" } })).status === 403);
+const malformed = await rawReq(base, "/intent", { token, headers: { "Content-Type": "application/json" }, body: "{" });
+ok("POST /intent with malformed JSON → 400", malformed.status === 400);
+const beforeOversize = intents.length;
+const oversized = await rawReq(base, "/intent", { token, headers: { "Content-Type": "application/json" }, body: `{"kind":"${"x".repeat(1_000_010)}"}` });
+ok("POST /intent with oversized JSON → 413", oversized.status === 413);
+ok("oversized body does NOT call coordinator", intents.length === beforeOversize);
+const multibyteBody = JSON.stringify({ kind: "kickoff", data: "😀".repeat(250_000) });
+ok("multibyte oversized fixture is under 1 MB in JS characters but over in UTF-8 bytes",
+  multibyteBody.length < 1_000_000 && Buffer.byteLength(multibyteBody, "utf8") > 1_000_000);
+const beforeMultibyteOversize = intents.length;
+const multibyteOversized = await rawReq(base, "/intent", {
+  token, headers: { "Content-Type": "application/json" }, body: multibyteBody,
+});
+ok("POST /intent with UTF-8 multibyte oversized JSON → 413 without coordinator call",
+  multibyteOversized.status === 413 && intents.length === beforeMultibyteOversize);
+
+const rejectedOpen = await startServer({
+  active: null,
+  openExternal: async () => { throw new Error("launcher rejected"); },
+  coordinator: { handleIntent: async () => ({ ok: true }) },
+});
+const rejectedOpenRes = await req(rejectedOpen.url.replace(/\/$/, ""), "/open", {
+  method: "POST",
+  token: rejectedOpen.token,
+  body: { url: "https://github.com/o/r/pull/1" },
+});
+ok("POST /open waits for launcher rejection → 500", rejectedOpenRes.status === 500);
+rejectedOpen.server.close();
+rejectedOpen.assetServer.close();
 
 // EventSource can't set headers, so /events accepts the token as a query param.
 const evNoTok = await fetch(base + "/events");
@@ -123,6 +160,21 @@ ok("GET /issues reports discovery failure without changing /state", failedDiscov
   (await req(discoveryFailure.url.replace(/\/$/, ""), "/state", { token: discoveryFailure.token })).json.active === false);
 discoveryFailure.server.close();
 discoveryFailure.assetServer.close();
+
+const blocker = http.createServer((req, res) => { res.writeHead(200); res.end("busy"); });
+await new Promise((resolve, reject) => {
+  blocker.once("error", reject);
+  blocker.listen(0, "127.0.0.1", resolve);
+});
+const busyPort = blocker.address().port;
+let bindFailed = false;
+try {
+  await startServer({ port: busyPort, coordinator: { handleIntent: async () => ({ ok: true }) } });
+} catch (e) {
+  bindFailed = /EADDRINUSE|address already in use/i.test(String(e.code || e.message || e));
+}
+ok("startServer rejects deterministically on bind failure", bindFailed);
+await new Promise((resolve) => blocker.close(resolve));
 
 // ---- Fix#3 (work-scope): asset origin serves ONLY the active issue's subtree ----
 const assetOrigin = assetBase.replace(/\/$/, "");

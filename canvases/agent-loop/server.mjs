@@ -13,6 +13,7 @@ import * as GitHub from "./github.mjs";
 import { getIssue, listComments, getComment, getPull, getPullHead, getPullFiles, findControlBlock, findCommentByHeading, findPrototypeComments, findQuestionnaireComment, findBuildReadyComment } from "./github.mjs";
 import { buildSnapshot } from "./pr.mjs";
 import { createCoordinator } from "./workflow.mjs";
+import { validateGithubTarget } from "./target.mjs";
 
 export const DATA_ROOT = join(homedir(), ".agent-loop");
 export const ACTIVE_FILE = join(DATA_ROOT, "active.json");
@@ -30,6 +31,13 @@ const MIME = {
 function sendJson(res, status, value) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
   res.end(JSON.stringify(value));
+}
+
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
 }
 
 // Only allow opening GitHub pages or the local preview server in the system
@@ -62,15 +70,82 @@ function openInSystemBrowser(u) {
   }
   else if (plat === "darwin") child = spawn("open", [u], { detached: true, stdio: "ignore" });
   else child = spawn("xdg-open", [u], { detached: true, stdio: "ignore" });
-  child.unref();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const onError = (err) => {
+      if (settled) return;
+      settled = true;
+      child.off("spawn", onSpawn);
+      reject(err);
+    };
+    const onSpawn = () => {
+      if (settled) return;
+      settled = true;
+      child.off("error", onError);
+      child.on("error", () => {});
+      child.unref();
+      resolve();
+    };
+    child.once("error", onError);
+    child.once("spawn", onSpawn);
+  });
 }
 
 function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    let tooLarge = false;
+    let settled = false;
+    const fail = (status, message) => {
+      if (settled) return;
+      settled = true;
+      reject(new HttpError(status, message));
+    };
+    req.on("data", (c) => {
+      if (tooLarge) return;
+      const chunk = Buffer.isBuffer(c) ? c : Buffer.from(c);
+      size += chunk.length;
+      if (size > 1_000_000) {
+        tooLarge = true;
+        chunks.length = 0;
+        fail(413, "request body too large");
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (settled) return;
+      try {
+        const body = chunks.length ? Buffer.concat(chunks).toString("utf8") : "";
+        resolve(body ? JSON.parse(body) : {});
+      }
+      catch { fail(400, "malformed JSON"); }
+    });
+    req.on("aborted", () => fail(400, "interrupted JSON request"));
+    req.on("error", () => fail(400, "interrupted JSON request"));
+  });
+}
+
+function listenLoopback(server, port = 0) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      server.off("listening", onListening);
+      server.off("error", onError);
+    };
+    const onListening = () => { cleanup(); resolve(); };
+    const onError = (err) => { cleanup(); reject(err); };
+    server.once("listening", onListening);
+    server.once("error", onError);
+    try { server.listen(port, "127.0.0.1"); }
+    catch (e) { cleanup(); reject(e); }
+  });
+}
+
+function closeServer(server) {
   return new Promise((resolve) => {
-    let body = "";
-    req.on("data", (c) => { body += c; if (body.length > 1_000_000) req.destroy(); });
-    req.on("end", () => { try { resolve(body ? JSON.parse(body) : {}); } catch { resolve({}); } });
-    req.on("error", () => resolve({}));
+    try { server.close(() => resolve()); }
+    catch { resolve(); }
   });
 }
 
@@ -317,11 +392,14 @@ export async function startServer(deps = {}) {
   // New canvas instances always start at the launcher. A caller may explicitly
   // bind an issue, but the process-wide compatibility pointer is never adopted
   // implicitly.
-  let active = Object.hasOwn(deps, "active") ? deps.active : null;
+  let active = Object.hasOwn(deps, "active") && deps.active != null
+    ? validateGithubTarget(deps.active)
+    : null;
   const readBoundActive = async () => active;
   const setBoundActive = async (owner, repo, issue) => {
-    active = { owner, repo, issue };
-    await setActive(owner, repo, issue);
+    const target = validateGithubTarget({ owner, repo, issue });
+    await setActive(target.owner, target.repo, target.issue);
+    active = target;
   };
   const buildBoundState = async () => active
     ? (deps.buildState || buildState)(active)
@@ -380,28 +458,30 @@ export async function startServer(deps = {}) {
       res.writeHead(404); res.end("Not found");
     } catch { try { res.writeHead(500); res.end("error"); } catch {} }
   });
-  await new Promise((resolve) => assetServer.listen(0, "127.0.0.1", resolve));
+  await listenLoopback(assetServer, 0);
   const aAddr = assetServer.address();
   assetPort = typeof aAddr === "object" && aAddr ? aAddr.port : 0;
   const assetBase = `http://127.0.0.1:${assetPort}`;
   let serverEntry = null;
-  const github = deps.github || {
-    ...GitHub,
-    detectRepo: () => GitHub.detectRepo(deps.workingDirectory),
-  };
-  const coordinator = deps.coordinator || createCoordinator({
-    github,
-    sendPrompt: deps.sendPrompt || deps.onPrompt || (async () => {}),
-    setActive: setBoundActive,
-    readActive: readBoundActive,
-    workRoot: WORK_ROOT,
-    assetBase,
-    instanceId: deps.instanceId || "agent-loop",
-    openPrSession: deps.openPrSession,
-    refresh: async () => { if (serverEntry) broadcastRefresh(serverEntry); },
-  });
+  try {
+    const github = deps.github || {
+      ...GitHub,
+      detectRepo: () => GitHub.detectRepo(deps.workingDirectory),
+    };
+    const coordinator = deps.coordinator || createCoordinator({
+      github,
+      sendPrompt: deps.sendPrompt || deps.onPrompt || (async () => {}),
+      setActive: setBoundActive,
+      readActive: readBoundActive,
+      workRoot: WORK_ROOT,
+      assetBase,
+      instanceId: deps.instanceId || "agent-loop",
+      openPrSession: deps.openPrSession,
+      refresh: async () => { if (serverEntry) broadcastRefresh(serverEntry); },
+    });
+    const openExternal = deps.openExternal || openInSystemBrowser;
 
-  const server = createServer(async (req, res) => {
+    const server = createServer(async (req, res) => {
     try {
       if (!hostAllowed(req, mainPort)) { res.writeHead(403); res.end("Forbidden host"); return; }
       const url = new URL(req.url || "/", "http://127.0.0.1");
@@ -478,8 +558,8 @@ export async function startServer(deps = {}) {
         const body = await readBody(req);
         const target = typeof body.url === "string" ? body.url : "";
         if (!isSafeOpenUrl(target)) { sendJson(res, 400, { ok: false, error: "blocked url" }); return; }
-        try { openInSystemBrowser(target); sendJson(res, 200, { ok: true }); }
-        catch (e) { sendJson(res, 502, { ok: false, error: String(e.message || e) }); }
+        try { await openExternal(target); sendJson(res, 200, { ok: true }); }
+        catch (e) { sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
         return;
       }
       if (req.method === "POST" && path === "/intent") {
@@ -494,21 +574,25 @@ export async function startServer(deps = {}) {
         return;
       }
       res.writeHead(404); res.end("Not found");
-    } catch (e) {
-      try { sendJson(res, 500, { error: String(e.message || e) }); } catch {}
-    }
-  });
+      } catch (e) {
+        try { sendJson(res, e.status || 500, { error: String(e.message || e) }); } catch {}
+      }
+    });
 
-  await new Promise((resolve) => server.listen(deps.port || 0, "127.0.0.1", resolve));
-  const addr = server.address();
-  const port = typeof addr === "object" && addr ? addr.port : 0;
-  mainPort = port;
-  serverEntry = {
-    server, assetServer, clients, url: `http://127.0.0.1:${port}/`, assetBase,
-    token, coordinator, readActive: readBoundActive, setActive: setBoundActive,
-    buildState: buildBoundState, buildPrSnapshot: buildBoundPrSnapshot,
-  };
-  return serverEntry;
+    await listenLoopback(server, deps.port || 0);
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    mainPort = port;
+    serverEntry = {
+      server, assetServer, clients, url: `http://127.0.0.1:${port}/`, assetBase,
+      token, coordinator, readActive: readBoundActive, setActive: setBoundActive,
+      buildState: buildBoundState, buildPrSnapshot: buildBoundPrSnapshot,
+    };
+    return serverEntry;
+  } catch (e) {
+    await closeServer(assetServer);
+    throw e;
+  }
 }
 
 export function broadcastRefresh(entry) {
@@ -518,6 +602,7 @@ export function broadcastRefresh(entry) {
 }
 
 export async function setActive(owner, repo, issue) {
+  const target = validateGithubTarget({ owner, repo, issue });
   if (!existsSync(DATA_ROOT)) await mkdir(DATA_ROOT, { recursive: true });
-  await writeFile(ACTIVE_FILE, JSON.stringify({ owner, repo, issue }, null, 2));
+  await writeFile(ACTIVE_FILE, JSON.stringify(target, null, 2));
 }

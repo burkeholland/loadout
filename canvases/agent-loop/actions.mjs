@@ -1,10 +1,11 @@
 import { ACTIVE_FILE, DATA_ROOT, WORK_ROOT } from "./server.mjs";
+import { TARGET_SCHEMA_PROPS, validateGithubTarget } from "./target.mjs";
 
 export function createAgentLoopActions({ servers, refreshAll }) {
   return [
     {
       name: "refresh",
-      description: "Nudge the Agent Loop canvas to re-read issue state after a transition.",
+      description: "Nudge the Flow canvas to re-read issue state after a transition.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       handler: async (ctx) => {
         refreshAll(ctx && ctx.instanceId);
@@ -13,7 +14,7 @@ export function createAgentLoopActions({ servers, refreshAll }) {
     },
     {
       name: "get_state",
-      description: "Return the current Agent Loop read model for this canvas instance.",
+      description: "Return the current Flow read model for this canvas instance.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       handler: async (ctx) => {
         const entry = servers.get(ctx && ctx.instanceId);
@@ -22,38 +23,33 @@ export function createAgentLoopActions({ servers, refreshAll }) {
     },
     {
       name: "get_config",
-      description: "Return the fixed on-disk paths used by Agent Loop.",
+      description: "Return the fixed on-disk paths used by Flow.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       handler: async () => ({ dataRoot: DATA_ROOT, activeFile: ACTIVE_FILE, workRoot: WORK_ROOT }),
     },
     {
       name: "set_active",
-      description: "Bind this canvas instance to an Agent Loop issue and return its fresh read model.",
+      description: "Bind this canvas instance to a Flow issue and return its fresh read model.",
       inputSchema: {
         type: "object",
-        properties: {
-          owner: { type: "string" },
-          repo: { type: "string" },
-          issue: { type: "number" },
-        },
+        properties: TARGET_SCHEMA_PROPS,
         required: ["owner", "repo", "issue"],
         additionalProperties: false,
       },
       handler: async (ctx) => {
-        const { owner, repo, issue } = (ctx && ctx.input) || {};
-        if (!owner || !repo || !issue) {
-          return { ok: false, error: "owner, repo and issue are all required" };
-        }
+        let target;
+        try { target = validateGithubTarget((ctx && ctx.input) || {}); }
+        catch (e) { return { ok: false, error: String(e.message || e) }; }
         const entry = servers.get(ctx && ctx.instanceId);
-        if (!entry) return { ok: false, error: "Agent Loop instance is not active" };
-        await entry.setActive(owner, repo, issue);
+        if (!entry) return { ok: false, error: "Flow instance is not active" };
+        await entry.setActive(target.owner, target.repo, target.issue);
         refreshAll(ctx && ctx.instanceId);
         return { ok: true, state: await entry.buildState() };
       },
     },
     {
       name: "submit_stage",
-      description: "Submit a generated stage asset for this Agent Loop canvas instance.",
+      description: "Submit a generated stage asset for this Flow canvas instance.",
       inputSchema: {
         type: "object",
         properties: {
@@ -70,7 +66,7 @@ export function createAgentLoopActions({ servers, refreshAll }) {
       handler: async (ctx) => {
         const entry = servers.get(ctx && ctx.instanceId);
         if (!entry || !entry.coordinator) {
-          return { ok: false, error: "Agent Loop instance is not active" };
+          return { ok: false, error: "Flow instance is not active" };
         }
         const out = await entry.coordinator.submitStage((ctx && ctx.input) || {});
         refreshAll(ctx && ctx.instanceId);

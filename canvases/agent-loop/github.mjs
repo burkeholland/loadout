@@ -41,6 +41,7 @@ async function gh(args, opts) {
     } catch (e) {
       lastErr = e;
       if (!TRANSIENT.test(String(e.message || e))) break;
+      if (attempt === 3) break;
       await new Promise((r) => setTimeout(r, 400 * Math.pow(2, attempt)));
     }
   }

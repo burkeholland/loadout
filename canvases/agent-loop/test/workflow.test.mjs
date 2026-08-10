@@ -144,7 +144,7 @@ await test("full workflow E2E with call-counting fake GitHub", async () => {
   assert.match(prompts[0].prompt, /"owner": "o"/);
   assert.match(prompts[0].prompt, /"issue": 7/);
   assert.match(prompts[0].prompt, /gh api repos\/o\/r\/issues\/7 --jq \.body/);
-  assert.match(prompts[0].prompt, /Do not create\/update Agent Loop issue comments/i);
+  assert.match(prompts[0].prompt, /Do not create\/update Flow issue comments/i);
 
   let o = order(prompts);
   await coordinator.submitStage({ opId: o.opId, submissionToken: o.token, artifact: { body: "Research brief with useful tradeoffs." } });
@@ -218,6 +218,29 @@ await test("work-order input executes through the real submit_stage action schem
   assert.equal(stateOf(fake).stage, "prototype");
 });
 
+await test("set_active validates GitHub targets and preserves valid repo names", async () => {
+  const bound = [];
+  const servers = new Map([["inst-1", {
+    setActive: async (owner, repo, issue) => { bound.push({ owner, repo, issue }); },
+    buildState: async () => ({ active: true, owner: bound[0].owner, repo: bound[0].repo, issue: bound[0].issue }),
+  }]]);
+  const actions = createAgentLoopActions({ servers, refreshAll: () => {} });
+  const setActive = actions.find((action) => action.name === "set_active");
+  assert.equal(setActive.inputSchema.properties.issue.type, "integer");
+  const invalid = await setActive.handler({ instanceId: "inst-1", input: { owner: "-bad", repo: "r", issue: 7 } });
+  assert.equal(invalid.ok, false);
+  const stringIssue = await setActive.handler({ instanceId: "inst-1", input: { owner: "octo", repo: "r", issue: "7" } });
+  assert.equal(stringIssue.ok, false);
+  assert.equal(bound.length, 0);
+  const dotRepo = await setActive.handler({ instanceId: "inst-1", input: { owner: "octo-org", repo: ".github", issue: 1 } });
+  assert.equal(dotRepo.ok, true);
+  assert.deepEqual(bound[0], { owner: "octo-org", repo: ".github", issue: 1 });
+  bound.length = 0;
+  const underscoreRepo = await setActive.handler({ instanceId: "inst-1", input: { owner: "octo", repo: "repo_name", issue: 2 } });
+  assert.equal(underscoreRepo.ok, true);
+  assert.deepEqual(bound[0], { owner: "octo", repo: "repo_name", issue: 2 });
+});
+
 await test("duplicate kickoff race creates one issue and one work order", async () => {
   const { fake, prompts, coordinator } = makeLoop();
   await Promise.all([
@@ -276,7 +299,7 @@ await test("open-existing rejects foreign, unmanaged, missing, and mismatched wo
   fake.comments = [];
   await assert.rejects(
     () => coordinator.handleIntent({ kind: "open-existing", owner: "o", repo: "r", issue: 7 }),
-    /no valid Agent Loop control block/,
+    /no valid Flow control block/,
   );
   await seedState(fake, verifyState({ owner: "other", pending: null }));
   await assert.rejects(
@@ -339,6 +362,22 @@ await test("review-local ignores stale txn but sends exact work order", async ()
   assert.match(prompts[0].prompt, /open_pr_session/);
   assert.match(prompts[0].prompt, /o\/r PR #42/);
   assert.equal(stateOf(fake).txn, 5);
+});
+
+await test("ship requires an explicit reviewed head matching the implementation head", async () => {
+  const { fake, coordinator } = makeLoop();
+  await seedState(fake, { version: 2, txn: 5, owner: "o", repo: "r", issue: 7, title: "Review", baseBranch: "main",
+    stage: "implementing", gate: "feedback", round: 1, implRound: 1, status: "waiting", pending: null,
+    artifacts: { plan: { commentId: 1 }, impl: { prNumber: 42, branch: "agent-loop/issue-7", base: "main", headSha: "sha-current" } } });
+  fake.pull = { ...fake.pull, number: 42, headRefOid: "sha-current" };
+  await assert.rejects(
+    () => coordinator.handleIntent(intent(fake, "ship", { prNumber: 42 })),
+    /explicitly reviewed PR head/,
+  );
+  await assert.rejects(
+    () => coordinator.handleIntent(intent(fake, "ship", { prNumber: 42, reviewedHeadSha: "sha-old" })),
+    /reviewed head does not match/,
+  );
 });
 
 await test("iterate and plan-revise create deterministic pending work", async () => {
@@ -446,6 +485,44 @@ await test("invalid PR blocks implementation artifact", async () => {
   fake.pull.headRefName = "wrong-branch";
   o = order(prompts);
   await assert.rejects(() => coordinator.submitStage({ opId: o.opId, submissionToken: o.token, artifact: { summary: "bad pr" } }), /wrong branch/);
+});
+
+await test("implementation artifact validates supplied PR numbers before GitHub reads", async () => {
+  const { fake, coordinator } = makeLoop();
+  const token = "pr-number-token";
+  const crypto = await import("node:crypto");
+  await seedState(fake, {
+    version: 2, txn: 20, owner: "o", repo: "r", issue: 7, title: "PR validation", baseBranch: "main",
+    stage: "implementing", gate: null, round: 1, implRound: 2, status: "working",
+    pending: {
+      opId: "iss7/implementing/r2", kind: "implement", inputCommentIds: [], round: 2, attempt: 1,
+      submissionTokenHash: crypto.createHash("sha256").update(token).digest("hex"),
+    },
+    artifacts: { plan: { commentId: 1 } },
+  });
+  for (const prNumber of [
+    0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1,
+    "0", "-1", "1.5", "https://github.com/o/r/pull/1", "agent-loop/issue-7", "1x", "9007199254740992",
+  ]) {
+    const reads = fake.calls.filter((call) => Array.isArray(call) && call[0] === "getPullValidation").length;
+    await assert.rejects(
+      () => coordinator.submitStage({
+        owner: "o", repo: "r", issue: 7, opId: "iss7/implementing/r2", submissionToken: token,
+        artifact: { summary: "invalid supplied PR", prNumber },
+      }),
+      /positive safe integer/,
+    );
+    assert.equal(
+      fake.calls.filter((call) => Array.isArray(call) && call[0] === "getPullValidation").length,
+      reads,
+      `invalid PR ${String(prNumber)} must not call getPullValidation`,
+    );
+  }
+  await coordinator.submitStage({
+    owner: "o", repo: "r", issue: 7, opId: "iss7/implementing/r2", submissionToken: token,
+    artifact: { summary: "compatible string PR", prNumber: "001" },
+  });
+  assert.ok(fake.calls.some((call) => Array.isArray(call) && call[0] === "getPullValidation" && call[1] === 1));
 });
 
 await test("implement web preview path is code-stamped and validated", async () => {

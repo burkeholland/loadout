@@ -17,7 +17,7 @@ export function renderHtml(token = "", assetBase = "") {
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="al-cap" content="${cap}" />
 <meta name="al-assets" content="${assets}" />
-<title>Agent Loop</title>
+<title>Flow</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -245,7 +245,7 @@ export function renderHtml(token = "", assetBase = "") {
     <div class="brand">
       <span class="mark" id="brandMark"></span>
       <span class="who">
-        <span class="name">Agent Loop</span>
+        <span class="name">Flow</span>
         <span class="meta" id="repoMeta">no active job</span>
       </span>
     </div>
@@ -316,7 +316,6 @@ function gfetch(path, opts) {
 }
 function capUrl(path) { return CAP ? path + (path.indexOf("?") >= 0 ? "&" : "?") + "t=" + encodeURIComponent(CAP) : path; }
 let last = null;
-let sending = false;
 let lastState = null;   // most recent /state object (for strip nav)
 let lastGoodState = null; // most recent state WITHOUT a read error (survives outages)
 let viewKey = null;     // when set, panel shows a read-only review of that stage
@@ -458,7 +457,7 @@ async function sendIntent(kind, data, ctx) {
     await post("/intent", payload);
     return true;
   } catch (e) {
-    toast(e && e.message ? e.message : "Agent Loop request failed.");
+    toast(e && e.message ? e.message : "Flow request failed.");
     return false;
   } finally {
     // Re-enable after a beat; the next /state poll will re-render the panel.
@@ -555,7 +554,7 @@ function renderExistingBuilds(query) {
   const issues = (idleBuildData.issues || []).filter((issue) =>
     !q || String(issue.title || "").toLowerCase().includes(q) || String(issue.number).includes(q));
   if (!issues.length) {
-    list.innerHTML = '<div class="build-empty">' + (q ? "No matching builds." : "No open Agent Loop builds yet.") + '</div>';
+    list.innerHTML = '<div class="build-empty">' + (q ? "No matching builds." : "No open Flow builds yet.") + '</div>';
     return;
   }
   list.innerHTML = issues.map((issue) => {
@@ -608,7 +607,7 @@ function renderIdle() {
     '<button class="idle-tab active" id="existingTab" type="button" role="tab">Existing builds</button>' +
     '<button class="idle-tab" id="newTab" type="button" role="tab">New build</button></div>' +
     '<div class="idle-pane" id="existingPane" role="tabpanel">' +
-    '<label class="field" for="buildSearch">Search open Agent Loop issues</label>' +
+    '<label class="field" for="buildSearch">Search open Flow issues</label>' +
     '<input class="input build-search" id="buildSearch" placeholder="Filter by title or issue number" />' +
     '<div id="buildStatus"><div class="build-empty">Loading existing builds…</div></div>' +
     '<div class="build-list" id="buildList"></div></div>' +
@@ -636,7 +635,7 @@ function renderIdle() {
     $("startBtn").disabled = true; $("startHint").textContent = "Starting deterministic workflow…";
     if (!kickoffReqId) kickoffReqId = newReqId();
     const ok = await sendIntent("kickoff", { idea, reqId: kickoffReqId }, {});
-    if (ok) toast("Kickoff accepted — Agent Loop is starting research.");
+    if (ok) toast("Kickoff accepted — Flow is starting research.");
     else { $("startBtn").disabled = false; $("startHint").textContent = ""; }
   };
   loadExistingBuilds(gen);
@@ -1108,8 +1107,10 @@ function renderPlanReview(s, readOnly) {
   if (readOnly) wireBack();
   // Fail closed: Approve stays disabled until the plan prose actually loads, so
   // the human can never green-light a plan they were unable to see.
+  let planLoaded = false;
   if (hasPlan) loadComment(s.plan.commentId, "planBrief", (ok) => {
     if (!gated || locked) return;
+    planLoaded = !!ok;
     const b = $("planOkBtn"); if (b) b.disabled = !ok;
   });
   if (!gated || locked) return;
@@ -1120,7 +1121,7 @@ function renderPlanReview(s, readOnly) {
     $("planOkBtn").disabled = true; $("planReviseBtn").disabled = true;
     const ok = await sendIntent("plan-ok", { notes: note }, ctxFor(s));
     if (ok) toast("Plan approved — starting the build.");
-    else { $("planOkBtn").disabled = false; $("planReviseBtn").disabled = false; }
+    else { $("planOkBtn").disabled = !planLoaded; $("planReviseBtn").disabled = false; }
   };
   $("planReviseBtn").onclick = async () => {
     const fb = ($("planFb").value || "").trim();
@@ -1128,7 +1129,7 @@ function renderPlanReview(s, readOnly) {
     $("planOkBtn").disabled = true; $("planReviseBtn").disabled = true;
     const ok = await sendIntent("plan-revise", { feedback: fb }, ctxFor(s));
     if (ok) toast("Sent — revising the plan.");
-    else { $("planOkBtn").disabled = false; $("planReviseBtn").disabled = false; }
+    else { $("planOkBtn").disabled = !planLoaded; $("planReviseBtn").disabled = false; }
   };
 }
 
@@ -1258,7 +1259,8 @@ function loadPrReview(s, gated) {
       h.innerHTML = renderPrSnapshot(snap);
       rewire();
       if (gated) {
-        const ok = !!(snap && snap.available !== false && snap.reviewable === true && idComplete);
+        const ok = !!(snap && snap.available !== false && snap.reviewable === true && idComplete &&
+          typeof snap.headRefOid === "string" && snap.headRefOid.length);
         shipReviewable = ok;
         lastReviewedHeadSha = ok ? (snap.headRefOid || null) : null;
         const ship = $("shipBtn");
@@ -1340,6 +1342,7 @@ function tryItBlock(s, impl, branch, readOnly) {
 function renderFeedback(s, readOnly) {
   const gated = s.gate === "feedback" && !readOnly;
   const locked = !!s.pending;
+  if (gated && !locked) { shipReviewable = false; lastReviewedHeadSha = null; }
   const head = readOnly ? reviewBar("Implement") : "";
   const banner = gated ? '<div class="gate-banner">' + svg("gate") + 'Human gate · review the PR, then ship or request changes</div>' : lockBanner(s);
   const impl = s.impl || null;
@@ -1396,7 +1399,7 @@ function renderFeedback(s, readOnly) {
     if ($("shipBtn").disabled) return; // fail-closed: PR missing or head moved
     const note = ($("revFb").value || "").trim();
     $("shipBtn").disabled = true; $("reviseBtn").disabled = true;
-    const ok = await sendIntent("ship", { prNumber: prNo || null, reviewedHeadSha: lastReviewedHeadSha || (impl && impl.headSha) || null, notes: note }, ctxFor(s));
+    const ok = await sendIntent("ship", { prNumber: prNo || null, reviewedHeadSha: lastReviewedHeadSha || null, notes: note }, ctxFor(s));
     if (ok) toast("Shipping — finalizing the PR.");
     else { $("shipBtn").disabled = !shipReviewable; $("reviseBtn").disabled = false; }
   };
@@ -1406,7 +1409,7 @@ function renderFeedback(s, readOnly) {
     $("shipBtn").disabled = true; $("reviseBtn").disabled = true;
     const ok = await sendIntent("revise", { prNumber: prNo || null, feedback: fb }, ctxFor(s));
     if (ok) toast("Sent — revising the PR.");
-    else { $("shipBtn").disabled = false; $("reviseBtn").disabled = false; }
+    else { $("shipBtn").disabled = !shipReviewable; $("reviseBtn").disabled = false; }
   };
 }
 

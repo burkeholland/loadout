@@ -1,4 +1,4 @@
-# Agent Loop canvas (project extension)
+# Flow canvas (project extension)
 
 A deterministic human-in-the-loop build loop backed by a GitHub issue. The
 issue, comments, labels, and one control-block comment are the durable state.
@@ -27,12 +27,12 @@ block, reconciles labels, mints `opId`/submission capabilities, and sends exact
 self-contained work orders with `session.send`.
 
 The idle launcher also reads `GET /issues`, which returns the five most recently
-updated open Agent Loop issues from the canvas session's repository. Selecting
+updated open Flow issues from the canvas session's repository. Selecting
 one sends `open-existing`; code validates its label and canonical control block,
 then binds that canvas instance without changing workflow state or waking an
 agent.
 
-Agents must not mutate Agent Loop issue state. A work order tells them what to
+Agents must not mutate Flow issue state. A work order tells them what to
 read, what asset to produce, and to call:
 
 ```json
@@ -62,3 +62,12 @@ using those credentials outside the supplied work order.
 | `pr.mjs` | Pure PR review snapshot/check/diff helpers. |
 
 Prototype and demo assets are served from `~\.agent-loop\work\<owner>\<repo>\<issue>\...` and are hash/containment validated before state advances.
+
+## Verification
+
+```powershell
+node --test .\canvases\agent-loop\test\derive.test.mjs .\canvases\agent-loop\test\server.test.mjs .\canvases\agent-loop\test\workflow.test.mjs
+node .\canvases\agent-loop\test\panels.harness.mjs
+Get-ChildItem .\canvases\agent-loop -Recurse -Filter *.mjs | ForEach-Object { node --check $_.FullName }
+git diff --check
+```

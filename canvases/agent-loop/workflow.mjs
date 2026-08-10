@@ -5,12 +5,12 @@ import { join, normalize, sep } from "node:path";
 import { STATE_SENTINEL, parseControlBlock, hasSentinel, parseQuestionnaire } from "./github.mjs";
 
 export const LABEL_DEFINITIONS = [
-  { name: "agent-loop", color: "5319e7", description: "Managed by the Agent Loop canvas" },
+  { name: "agent-loop", color: "5319e7", description: "Managed by the Flow canvas" },
   ...["research", "prototype", "planning", "planning-finalize", "implementing", "finalizing", "done"].map((s) => ({
-    name: `stage:${s}`, color: "0e8a16", description: `Agent Loop stage ${s}`,
+    name: `stage:${s}`, color: "0e8a16", description: `Flow stage ${s}`,
   })),
   ...["signoff", "questionnaire", "plan-review", "feedback"].map((g) => ({
-    name: `gate:${g}`, color: "fbca04", description: `Agent Loop human gate ${g}`,
+    name: `gate:${g}`, color: "fbca04", description: `Flow human gate ${g}`,
   })),
 ];
 
@@ -25,10 +25,10 @@ function tokenHash(t) { return createHash("sha256").update(String(t)).digest("he
 function opTxn(issue, stage, txn) { return `iss${issue}/${stage}/t${txn}`; }
 function opRound(issue, stage, round) { return `iss${issue}/${stage}/r${round}`; }
 function branchFor(issue) { return `agent-loop/issue-${issue}`; }
-function prTitle(issue, title) { return `Agent Loop #${issue}: ${title || "implementation"}`; }
+function prTitle(issue, title) { return `Flow #${issue}: ${title || "implementation"}`; }
 function shortTitle(idea) {
-  const s = String(idea || "Agent Loop job").replace(/\s+/g, " ").trim();
-  return s.length > 80 ? s.slice(0, 77) + "…" : s || "Agent Loop job";
+  const s = String(idea || "Flow job").replace(/\s+/g, " ").trim();
+  return s.length > 80 ? s.slice(0, 77) + "…" : s || "Flow job";
 }
 function issueUrl(owner, repo, issue) { return `https://github.com/${owner}/${repo}/issues/${issue}`; }
 function prUrl(owner, repo, number) { return `https://github.com/${owner}/${repo}/pull/${number}`; }
@@ -36,7 +36,7 @@ function prUrl(owner, repo, number) { return `https://github.com/${owner}/${repo
 function renderControl(data) {
   return `${STATE_SENTINEL}
 <details>
-<summary>Agent Loop state (managed by the canvas)</summary>
+<summary>Flow state (managed by the canvas)</summary>
 
 \`\`\`json
 ${JSON.stringify(data, null, 2)}
@@ -322,8 +322,8 @@ export function createCoordinator(deps) {
       const data = intent.data || {};
       if (intent.kind === "open-existing") {
         const labels = (cur.iss.labels || []).map((label) => typeof label === "string" ? label : label.name).filter(Boolean);
-        if (!labels.includes("agent-loop")) throw new Error("selected issue is not managed by Agent Loop");
-        if (!cur.control || !st) throw new Error("selected issue has no valid Agent Loop control block");
+        if (!labels.includes("agent-loop")) throw new Error("selected issue is not managed by Flow");
+        if (!cur.control || !st) throw new Error("selected issue has no valid Flow control block");
         if (String(st.owner) !== String(owner) || String(st.repo) !== String(repo) || Number(st.issue) !== issue) {
           throw new Error("selected issue control block has mismatched routing");
         }
@@ -337,8 +337,8 @@ export function createCoordinator(deps) {
         const prNumber = st.artifacts?.impl?.prNumber;
         if (!prNumber) throw new Error("no PR is available for review-local");
         const prompt = [
-          "AGENT LOOP REVIEW-LOCAL WORK ORDER",
-          `Canvas instance: ${instanceId}. Do not open or mutate any Agent Loop workflow state.`,
+          "FLOW REVIEW-LOCAL WORK ORDER",
+          `Canvas instance: ${instanceId}. Do not open or mutate any Flow workflow state.`,
           `Call open_pr_session for exactly ${owner}/${repo} PR #${prNumber}.`,
           `Use branch ${branchFor(issue)} for display/context only.`,
           "Do not post issue comments, update labels, update the control block, run stages, or call submit_stage.",
@@ -477,8 +477,9 @@ export function createCoordinator(deps) {
     validateIntent(cur, intent, "feedback");
     const st = cur.state;
     const impl = st.artifacts?.impl || {};
-    const reviewed = data.reviewedHeadSha || impl.headSha;
-    if (!impl.prNumber || !reviewed) throw new Error("ship requires a pinned PR head");
+    const reviewed = typeof data.reviewedHeadSha === "string" ? data.reviewedHeadSha.trim() : "";
+    if (!impl.prNumber || !reviewed) throw new Error("ship requires an explicitly reviewed PR head");
+    if (typeof impl.headSha !== "string" || !impl.headSha || reviewed !== impl.headSha) throw new Error("reviewed head does not match the current implementation head");
     const live = await github.getPullValidation(owner, repo, impl.prNumber);
     if (live.headRefOid && live.headRefOid !== reviewed) {
       const newTxn = Number(st.txn || 0) + 1;
@@ -672,8 +673,10 @@ export function createCoordinator(deps) {
 
   async function validateImplementationPr(owner, repo, issue, st, artifact) {
     const branch = branchFor(issue);
-    const pull = artifact.prNumber
-      ? await github.getPullValidation(owner, repo, artifact.prNumber)
+    const hasSuppliedPrNumber = Object.hasOwn(artifact || {}, "prNumber");
+    const prNumber = hasSuppliedPrNumber ? normalizePositivePrNumber(artifact.prNumber) : null;
+    const pull = hasSuppliedPrNumber
+      ? await github.getPullValidation(owner, repo, prNumber)
       : await github.findPullForBranch(owner, repo, branch);
     if (!pull) throw new Error(`No PR found for ${branch}`);
     if (String(pull.state).toUpperCase() !== "OPEN") throw new Error("implementation PR is not open");
@@ -681,6 +684,15 @@ export function createCoordinator(deps) {
     if (pull.baseRefName !== (st.baseBranch || "main")) throw new Error(`implementation PR must target base ${(st.baseBranch || "main")}`);
     if (st.artifacts?.impl?.prNumber && Number(st.artifacts.impl.prNumber) !== Number(pull.number)) throw new Error("implementation returned a different PR");
     return { prNumber: pull.number, prUrl: pull.url || prUrl(owner, repo, pull.number), branch: pull.headRefName, base: pull.baseRefName || artifact.base || "main", headSha: pull.headRefOid };
+  }
+
+  function normalizePositivePrNumber(value) {
+    if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return value;
+    if (typeof value === "string" && /^\d+$/.test(value)) {
+      const parsed = Number(value);
+      if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+    }
+    throw new Error("implementation PR number must be a positive safe integer");
   }
 
   async function validateFinalizePr(owner, repo, issue, st) {
@@ -783,13 +795,13 @@ export function createCoordinator(deps) {
     const inputCommands = (pending.inputCommentIds || []).map((id, i) =>
       `${i + 4}. Read input comment ${id}: gh api repos/${owner}/${repo}/issues/comments/${id} --jq .body`);
     const common = [
-      "AGENT LOOP STAGE WORK ORDER",
+      "FLOW STAGE WORK ORDER",
       `1. Use existing canvas instance ${instanceId}; never open another canvas.`,
       `2. Target exactly ${owner}/${repo} issue #${issue}; opId ${pending.opId}; kind ${pending.kind}; round ${pending.round ?? state.round ?? state.implRound ?? 1}.`,
       `3. Read the issue body: gh api repos/${owner}/${repo}/issues/${issue} --jq .body`,
       ...inputCommands,
       `${4 + inputCommands.length}. Inspect the repository from the current workspace. Check existing files/tests relevant to this stage before producing the asset.`,
-      `${5 + inputCommands.length}. Do not create/update Agent Loop issue comments, labels, control blocks, transitions, or workflow state.`,
+      `${5 + inputCommands.length}. Do not create/update Flow issue comments, labels, control blocks, transitions, or workflow state.`,
       `${6 + inputCommands.length}. Deterministic branch: ${branch}; base branch: ${base}; PR title template: ${prTitle(issue, state.title)}; PR body must reference ${issueUrl(owner, repo, issue)} and opId ${pending.opId}.`,
       `${7 + inputCommands.length}. Produce only the requested asset. Do not choose next states.`,
       `${8 + inputCommands.length}. Final action: call submit_stage on canvas instance ${instanceId} with exactly this input (replace only artifact):`,

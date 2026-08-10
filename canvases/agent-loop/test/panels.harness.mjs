@@ -40,6 +40,7 @@ function run(state, commentBody, opts) {
       return { ok: okPost, status: okPost ? 200 : 502, json: async () => ({ ok: okPost }) };
     }
     if (url === "/pr" && opts.prHttpFail) return { ok: false, status: 502, json: async () => ({}) };
+    if (url.startsWith("/comment/") && opts.commentHttpFail) return { ok: false, status: 502, json: async () => ({}) };
     if (url === "/issues" && opts.issuesHttpFail) {
       return { ok: false, status: 502, json: async () => ({ error: "discovery unavailable" }) };
     }
@@ -130,7 +131,7 @@ assert("plan-review loads plan brief", out.includes('id="planBrief"'));
 // Feedback gate
 r = run({ ...base, stage: "implementing", gate: "feedback", status: "waiting",
   impl: { commentId: 12, prNumber: 42, prUrl: "http://x/pull/42" } },
-  null, { prSnapshot: { available: true, reviewable: true, owner: "o", repo: "r", issue: 7, prNumber: 42, checks: { state: "passed" }, changedFiles: 1,
+  null, { prSnapshot: { available: true, reviewable: true, owner: "o", repo: "r", issue: 7, prNumber: 42, headRefOid: "SHA1", checks: { state: "passed" }, changedFiles: 1,
     files: [{ path: "a.js", status: "modified", additions: 1, deletions: 0, patch: "@@ -1 +1 @@\n+x", noPatch: false }] } });
 out = r.html;
 assert("feedback has ship + revise", out.includes('id="shipBtn"') && out.includes('id="reviseBtn"'));
@@ -172,7 +173,7 @@ assert("existing-build selection sends only structured bind routing", !!openExis
 
 r = run({ active: false }, null, { issuesPayload: { owner: "o", repo: "r", issues: [] } });
 await tick();
-assert("empty existing-build list is explicit", r.el("buildList")._html.includes("No open Agent Loop builds yet"));
+assert("empty existing-build list is explicit", r.el("buildList")._html.includes("No open Flow builds yet"));
 
 r = run({ active: false }, null, { issuesHttpFail: true });
 await tick();
@@ -261,13 +262,37 @@ assert("job switch mid-outage banner omits last-known claim", !/last known state
 // (1) A failed /intent POST must NOT report success and must re-enable buttons.
 r = run({ ...base, stage: "implementing", gate: "feedback", status: "waiting",
   impl: { commentId: 12, prNumber: 42, prUrl: "http://x/pull/42" } }, null,
-  { failPost: true, prSnapshot: { available: true, reviewable: true, owner: "o", repo: "r", issue: 7, prNumber: 42, checks: { state: "passed" }, changedFiles: 1,
+  { failPost: true, prSnapshot: { available: true, reviewable: true, owner: "o", repo: "r", issue: 7, prNumber: 42, headRefOid: "SHA1", checks: { state: "passed" }, changedFiles: 1,
     files: [{ path: "a.js", status: "modified", additions: 1, deletions: 0, patch: "@@ -1 +1 @@\n+x", noPatch: false }] } });
 const shipBtn = r.el("shipBtn");
 await tick();
 await shipBtn.onclick();
 assert("failed ship POST re-enables the ship button", shipBtn.disabled === false);
 assert("failed ship POST re-enables the revise button", r.el("reviseBtn").disabled === false);
+
+r = run({ ...base, stage: "implementing", gate: "feedback", status: "waiting",
+  impl: { commentId: 12, prNumber: 42, prUrl: "http://x/pull/42", headSha: "OLD" } }, null,
+  { failPost: true, prSnapshot: { available: true, reviewable: false, headMovedFromReview: true, owner: "o", repo: "r", issue: 7, prNumber: 42,
+    headRefOid: "NEW", checks: { state: "passed" }, files: [] } });
+await tick();
+r.el("revFb").value = "Please revise";
+await r.el("reviseBtn").onclick();
+assert("failed revise POST keeps Ship disabled when the snapshot is not reviewable", r.el("shipBtn").disabled === true);
+assert("failed revise POST re-enables the revise button", r.el("reviseBtn").disabled === false);
+
+const carriedReviewOpts = {
+  prSnapshot: { available: true, reviewable: true, owner: "o", repo: "r", issue: 7, prNumber: 42, headRefOid: "SHA1",
+    checks: { state: "passed" }, files: [] },
+};
+r = run({ ...base, stage: "implementing", gate: "feedback", status: "waiting",
+  impl: { commentId: 12, prNumber: 42, prUrl: "http://x/pull/42" } }, null, carriedReviewOpts);
+await tick();
+assert("reviewable feedback enables Ship before a new panel renders", r.el("shipBtn").disabled === false);
+carriedReviewOpts.failPost = true;
+r.render({ ...base, stage: "implementing", gate: "feedback", status: "waiting", impl: null });
+r.el("revFb").value = "Build a PR before asking for review";
+await r.el("reviseBtn").onclick();
+assert("failed revise after a no-PR feedback render keeps Ship disabled", r.el("shipBtn").disabled === true);
 
 // (2) Sign-off (prototype) gate honors pending like the other gates.
 out = run({ ...base, stage: "prototype", gate: "signoff", status: "waiting",
@@ -279,7 +304,7 @@ assert("signoff gate disables refine when pending", /id="refineBtn"[^>]*disabled
 // (3) SHIP/REVISE structured intent carries prNumber for machine-readable PR correlation.
 r = run({ ...base, stage: "implementing", gate: "feedback", status: "waiting",
   impl: { commentId: 12, prNumber: 42, prUrl: "http://x/pull/42" } }, null,
-  { prSnapshot: { available: true, reviewable: true, owner: "o", repo: "r", issue: 7, prNumber: 42, checks: { state: "passed" }, changedFiles: 1,
+  { prSnapshot: { available: true, reviewable: true, owner: "o", repo: "r", issue: 7, prNumber: 42, headRefOid: "SHA1", checks: { state: "passed" }, changedFiles: 1,
     files: [{ path: "a.js", status: "modified", additions: 1, deletions: 0, patch: "@@ -1 +1 @@\n+x", noPatch: false }] } });
 await tick();
 await r.el("shipBtn").onclick();
@@ -341,7 +366,7 @@ assert("disabled Ship does not POST", !f.posts.some((p) => p.url === "/intent"))
 // (c) Reviewable snapshot → files + CI render; Ship stays enabled and posts.
 f = run({ ...base, stage: "implementing", gate: "feedback", status: "waiting",
   impl: { commentId: 12, prNumber: 42, prUrl: "http://x/pull/42", headSha: "SHA1" } }, null,
-  { prSnapshot: { available: true, reviewable: true, owner: "o", repo: "r", issue: 7, prNumber: 42, checks: { state: "passed" }, changedFiles: 1,
+  { prSnapshot: { available: true, reviewable: true, owner: "o", repo: "r", issue: 7, prNumber: 42, headRefOid: "SHA1", checks: { state: "passed" }, changedFiles: 1,
     additions: 3, deletions: 1, files: [{ path: "a.js", status: "modified", additions: 3, deletions: 1,
       patch: "@@ -1 +1 @@\n-old\n+new", noPatch: false }] } });
 await tick();
@@ -365,7 +390,7 @@ assert("noPatch file labeled binary/unavailable", /No inline diff/.test(f.el("pr
 // snapshot claims reviewable (guards a cross-instance active-pointer swap).
 f = run({ ...base, owner: "o", repo: "r", issue: 7, stage: "implementing", gate: "feedback", status: "waiting",
   impl: { commentId: 12, prNumber: 42, prUrl: "http://x/pull/42" } }, null,
-  { prSnapshot: { available: true, reviewable: true, owner: "EVIL", repo: "r", issue: 7, prNumber: 42,
+  { prSnapshot: { available: true, reviewable: true, owner: "EVIL", repo: "r", issue: 7, prNumber: 42, headRefOid: "SHA1",
     checks: { state: "passed" }, files: [{ path: "secret.js", status: "modified", additions: 1, deletions: 0, patch: "@@ -1 +1 @@\n+leak", noPatch: false }] } });
 await tick();
 assert("foreign-identity snapshot keeps Ship disabled", f.el("shipBtn").disabled === true);
@@ -375,7 +400,7 @@ assert("foreign-identity snapshot is not painted", !f.el("prReview")._html.inclu
 // fields (owner/repo/issue) must NOT enable Ship, even though prNumber matches.
 f = run({ ...base, owner: "o", repo: "r", issue: 7, stage: "implementing", gate: "feedback", status: "waiting",
   impl: { commentId: 12, prNumber: 42, prUrl: "http://x/pull/42" } }, null,
-  { prSnapshot: { available: true, reviewable: true, prNumber: 42,
+  { prSnapshot: { available: true, reviewable: true, prNumber: 42, headRefOid: "SHA1",
     checks: { state: "passed" }, files: [{ path: "a.js", status: "modified", additions: 1, deletions: 0, patch: "@@ -1 +1 @@\n+x", noPatch: false }] } });
 await tick();
 assert("snapshot missing identity keeps Ship disabled (fail-closed)", f.el("shipBtn").disabled === true);
@@ -429,6 +454,19 @@ await tick();
 assert("plan-review Approve enables after plan loads", p.el("planOkBtn").disabled === false);
 await p.el("planOkBtn").onclick();
 assert("plan-review Approve POSTs plan-ok", p.posts.some((x) => x.url === "/intent" && x.body.kind === "plan-ok"));
+
+p = run({ ...base, stage: "planning-finalize", gate: "plan-review", status: "waiting", plan: null }, null, { failPost: true });
+p.el("planFb").value = "Tighten the rollout";
+await p.el("planReviseBtn").onclick();
+assert("failed plan revise with no plan keeps Approve disabled", p.el("planOkBtn").disabled === true);
+assert("failed plan revise with no plan re-enables revise", p.el("planReviseBtn").disabled === false);
+
+p = run({ ...base, stage: "planning-finalize", gate: "plan-review", status: "waiting",
+  plan: { commentId: 11, approved: null } }, null, { failPost: true, commentHttpFail: true });
+await tick();
+p.el("planFb").value = "Clarify risk";
+await p.el("planReviseBtn").onclick();
+assert("failed plan revise after failed plan load keeps Approve disabled", p.el("planOkBtn").disabled === true);
 
 // --- "Try it out" hands-on preview at the feedback gate ---------------------
 
