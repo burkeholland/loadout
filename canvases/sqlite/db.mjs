@@ -6,8 +6,8 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { homedir } from "node:os";
 
 export const DEFAULT_PAGE_SIZE = 100;
-export const MAX_PAGE_SIZE = 500;
-export const MAX_RESULT_ROWS = 1000;
+const MAX_PAGE_SIZE = 500;
+const MAX_RESULT_ROWS = 1000;
 
 const RECENTS_PATH = resolve(homedir(), ".sqlite-canvas", "recents.json");
 const MAX_RECENTS = 12;
@@ -64,7 +64,7 @@ function quoteIdent(name) {
   return `"${String(name).replaceAll('"', '""')}"`;
 }
 
-export function loadRecents() {
+function loadRecents() {
   try {
     const raw = readFileSync(RECENTS_PATH, "utf8");
     const parsed = JSON.parse(raw);
@@ -77,7 +77,7 @@ export function loadRecents() {
   return [];
 }
 
-export function pushRecent(path) {
+function pushRecent(path) {
   const abs = normalizePath(path);
   const next = [abs, ...loadRecents().filter((p) => p !== abs)].slice(0, MAX_RECENTS);
   mkdirSync(dirname(RECENTS_PATH), { recursive: true });
