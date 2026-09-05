@@ -80,7 +80,7 @@ export function buildClientState(instance) {
   };
 }
 
-export function broadcast(entry, event, data) {
+function broadcast(entry, event, data) {
   if (!entry) return;
   const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const client of entry.clients) client.write(msg);

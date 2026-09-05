@@ -243,7 +243,7 @@ export async function listComments(owner, repo, issue) {
 // order, mirroring the REST shape the parsers depend on. Throws (rather than
 // returning a false-empty result) when the repository/issue/comments connection
 // is absent, so a null repo/issue can't be mistaken for "no comments".
-export async function listCommentsGraphQL(owner, repo, issue) {
+async function listCommentsGraphQL(owner, repo, issue) {
   const query =
     "query($owner:String!,$repo:String!,$num:Int!,$cursor:String){" +
     "repository(owner:$owner,name:$repo){issue(number:$num){" +
@@ -438,7 +438,7 @@ export function findPrototypeComments(comments) {
 // Parse the variant bullet list out of a prototype comment into structured
 // options the canvas can render as visual cards. Each bullet looks like:
 //   - **Variant 1 — Title:** pitch [Local preview](http://…) · Repo path: `path`
-export function parsePrototypeOptions(body) {
+function parsePrototypeOptions(body) {
   if (!body) return [];
   const out = [];
   const lines = body.split(/\r?\n/);

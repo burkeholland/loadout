@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { join, normalize, sep } from "node:path";
 import { STATE_SENTINEL, parseControlBlock, hasSentinel, parseQuestionnaire } from "./github.mjs";
 
-export const LABEL_DEFINITIONS = [
+const LABEL_DEFINITIONS = [
   { name: "agent-loop", color: "5319e7", description: "Managed by the Agent Loop canvas" },
   ...["research", "prototype", "planning", "planning-finalize", "implementing", "finalizing", "done"].map((s) => ({
     name: `stage:${s}`, color: "0e8a16", description: `Agent Loop stage ${s}`,
@@ -65,7 +65,7 @@ function renderSys({ heading, body, opId, payload }) {
   return `## ${heading}\n\n${safeBody(body)}\n\n${marker("AL-SYS", opId, payload)}`;
 }
 
-export function findCanonicalControl(comments) {
+function findCanonicalControl(comments) {
   const found = [];
   for (const c of comments || []) {
     if (!hasSentinel(c.body)) continue;

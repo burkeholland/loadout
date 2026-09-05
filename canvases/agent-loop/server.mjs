@@ -74,7 +74,7 @@ function readBody(req) {
   });
 }
 
-export async function readActive() {
+async function readActive() {
   try {
     const raw = await readFile(ACTIVE_FILE, "utf8");
     const j = JSON.parse(raw);
@@ -88,7 +88,7 @@ function labelNames(issue) {
 }
 
 // Build the issue-authoritative read model consumed by the webview.
-export async function buildState(target = null) {
+async function buildState(target = null) {
   const active = target || await readActive();
   if (!active) return { active: false };
   const { owner, repo, issue } = active;
@@ -239,7 +239,7 @@ export function deriveState({ owner, repo, issue, iss, comments }) {
 // is volatile: putting it in the 4s poll would thrash the gate panel and wipe
 // in-progress feedback text. The PR is resolved from the ACTIVE issue's derived
 // state — the client never supplies owner/repo/number.
-export async function buildPrSnapshot(target = null) {
+async function buildPrSnapshot(target = null) {
   const state = await buildState(target);
   if (!state || !state.active) return { available: false, reason: "no-active-issue" };
   const { owner, repo, issue } = state;
