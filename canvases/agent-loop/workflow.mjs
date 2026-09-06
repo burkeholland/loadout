@@ -231,12 +231,6 @@ export function createCoordinator(deps) {
     await refresh();
     return { ok: true, state: next, workOrder: prompt };
   }
-  async function reloadAndDispatch(owner, repo, issue) {
-    const cur = await read(owner, repo, issue);
-    if (!cur.state) throw new Error("missing control block");
-    return dispatch(owner, repo, issue, cur.state, cur.controlCommentId);
-  }
-
   async function kickoff(input) {
     const reqId = String(input.reqId || "");
     if (!reqId) throw new Error("reqId is required");

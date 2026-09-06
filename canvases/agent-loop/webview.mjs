@@ -316,7 +316,6 @@ function gfetch(path, opts) {
 }
 function capUrl(path) { return CAP ? path + (path.indexOf("?") >= 0 ? "&" : "?") + "t=" + encodeURIComponent(CAP) : path; }
 let last = null;
-let sending = false;
 let lastState = null;   // most recent /state object (for strip nav)
 let lastGoodState = null; // most recent state WITHOUT a read error (survives outages)
 let viewKey = null;     // when set, panel shows a read-only review of that stage

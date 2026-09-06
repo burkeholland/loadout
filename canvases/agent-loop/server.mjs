@@ -517,7 +517,7 @@ export function broadcastRefresh(entry) {
   for (const client of entry.clients) { try { client.write(payload); } catch {} }
 }
 
-export async function setActive(owner, repo, issue) {
+async function setActive(owner, repo, issue) {
   if (!existsSync(DATA_ROOT)) await mkdir(DATA_ROOT, { recursive: true });
   await writeFile(ACTIVE_FILE, JSON.stringify({ owner, repo, issue }, null, 2));
 }
