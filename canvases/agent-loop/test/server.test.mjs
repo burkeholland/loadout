@@ -3,7 +3,6 @@
 // that lack the per-server token. Prototype assets (/work/*) live on a SEPARATE
 // token-less asset origin, which is also exercised here.
 // Run: node server.test.mjs
-import assert from "node:assert";
 import http from "node:http";
 import { join } from "node:path";
 import { readFile, writeFile, mkdir, rm, symlink } from "node:fs/promises";
