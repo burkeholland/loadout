@@ -1,6 +1,5 @@
 import { randomBytes, createHash } from "node:crypto";
-import { mkdir, readFile, realpath, stat } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { join, normalize, sep } from "node:path";
 import { STATE_SENTINEL, parseControlBlock, hasSentinel, parseQuestionnaire } from "./github.mjs";
 
