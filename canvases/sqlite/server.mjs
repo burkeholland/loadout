@@ -135,10 +135,6 @@ export async function handleApi(entry, pathname, body) {
   const { store, ui } = instance;
 
   try {
-    if (pathname === "/api/state") {
-      return { ok: true, state: buildClientState(instance) };
-    }
-
     if (pathname === "/api/open") {
       store.open(body.path, { create: !!body.create });
       ui.selectedTable = null;
@@ -176,14 +172,6 @@ export async function handleApi(entry, pathname, body) {
       });
       ui.schema = store.describeTable(table);
       ui.tab = "data";
-      ui.lastError = null;
-      return { ok: true, state: buildClientState(instance) };
-    }
-
-    if (pathname === "/api/describe") {
-      const table = body.table || ui.selectedTable;
-      if (!table) throw new DbError("No table selected", "bad_table");
-      ui.schema = store.describeTable(table);
       ui.lastError = null;
       return { ok: true, state: buildClientState(instance) };
     }
