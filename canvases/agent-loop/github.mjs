@@ -218,9 +218,6 @@ export async function getPullFiles(owner, repo, number) {
 // failure). Only these should trigger the GraphQL fallback — a genuine
 // 401/403/404 must surface, never be masked by an empty GraphQL result.
 const DEGRADED = /HTTP 5\d\d|Failed to parse gh output|Unexpected token|invalid character|<!DOCTYPE|<html|timed out|ETIMEDOUT|ECONNRESET|EAI_AGAIN|ENOTFOUND|socket hang up/i;
-export function isDegradedError(err) {
-  return DEGRADED.test(String((err && err.message) || err || ""));
-}
 
 export async function listComments(owner, repo, issue) {
   try {

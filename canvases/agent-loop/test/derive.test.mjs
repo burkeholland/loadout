@@ -4,7 +4,7 @@ import assert from "node:assert";
 import { deriveState } from "../server.mjs";
 import {
   parseControlBlock, findControlBlock, parseQuestionnaire,
-  findBuildReadyComment, findPrototypeComments, isDegradedError,
+  findBuildReadyComment, findPrototypeComments,
   normalizeAgentLoopIssues, STATE_SENTINEL,
 } from "../github.mjs";
 import { summarizeChecks, boundFiles, buildSnapshot } from "../pr.mjs";
@@ -330,23 +330,6 @@ test("multiple build-ready posts: newest PR wins in fallback", () => {
   const s = deriveState({ owner: "o", repo: "r", issue: 7, iss: withLabels("agent-loop", "stage:implementing", "gate:feedback"), comments });
   assert.equal(s.impl.commentId, 21);
   assert.equal(s.impl.prNumber, 40);
-});
-
-test("isDegradedError: 5xx / HTML / network errors trigger the fallback", () => {
-  assert.ok(isDegradedError(new Error("gh: HTTP 503")));
-  assert.ok(isDegradedError(new Error("Failed to parse gh output: Unexpected token '<'")));
-  assert.ok(isDegradedError(new Error("invalid character '<' looking for beginning of value")));
-  assert.ok(isDegradedError(new Error("<!DOCTYPE html>")));
-  assert.ok(isDegradedError(new Error("request to https://api.github.com timed out")));
-  assert.ok(isDegradedError(new Error("read ECONNRESET")));
-});
-
-test("isDegradedError: auth / permission / not-found do NOT trigger the fallback", () => {
-  assert.ok(!isDegradedError(new Error("gh: HTTP 404 Not Found")));
-  assert.ok(!isDegradedError(new Error("gh: HTTP 403 Forbidden")));
-  assert.ok(!isDegradedError(new Error("gh: HTTP 401 Bad credentials")));
-  assert.ok(!isDegradedError(new Error("Could not resolve to an Issue")));
-  assert.ok(!isDegradedError(null));
 });
 
 // --- PR review snapshot (feedback gate evidence) -----------------------------
