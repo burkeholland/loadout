@@ -592,7 +592,7 @@ export function broadcastRefresh(entry) {
 }
 
 async function setActive(owner, repo, issue) {
- const target = validateGithubTarget({ owner, repo, issue });
+  const target = validateGithubTarget({ owner, repo, issue });
   if (!existsSync(DATA_ROOT)) await mkdir(DATA_ROOT, { recursive: true });
   await writeFile(ACTIVE_FILE, JSON.stringify(target, null, 2));
 }
