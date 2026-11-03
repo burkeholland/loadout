@@ -1,10 +1,9 @@
 import { randomBytes, createHash } from "node:crypto";
-import { mkdir, readFile, realpath, stat } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { join, normalize, sep } from "node:path";
 import { STATE_SENTINEL, parseControlBlock, hasSentinel, parseQuestionnaire } from "./github.mjs";
 
-export const LABEL_DEFINITIONS = [
+const LABEL_DEFINITIONS = [
   { name: "agent-loop", color: "5319e7", description: "Managed by the Flow canvas" },
   ...["research", "prototype", "planning", "planning-finalize", "implementing", "finalizing", "done"].map((s) => ({
     name: `stage:${s}`, color: "0e8a16", description: `Flow stage ${s}`,
@@ -65,7 +64,7 @@ function renderSys({ heading, body, opId, payload }) {
   return `## ${heading}\n\n${safeBody(body)}\n\n${marker("AL-SYS", opId, payload)}`;
 }
 
-export function findCanonicalControl(comments) {
+function findCanonicalControl(comments) {
   const found = [];
   for (const c of comments || []) {
     if (!hasSentinel(c.body)) continue;
@@ -231,12 +230,6 @@ export function createCoordinator(deps) {
     await refresh();
     return { ok: true, state: next, workOrder: prompt };
   }
-  async function reloadAndDispatch(owner, repo, issue) {
-    const cur = await read(owner, repo, issue);
-    if (!cur.state) throw new Error("missing control block");
-    return dispatch(owner, repo, issue, cur.state, cur.controlCommentId);
-  }
-
   async function kickoff(input) {
     const reqId = String(input.reqId || "");
     if (!reqId) throw new Error("reqId is required");

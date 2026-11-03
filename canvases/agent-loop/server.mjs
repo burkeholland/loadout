@@ -149,24 +149,14 @@ function closeServer(server) {
   });
 }
 
-export async function readActive() {
-  try {
-    const raw = await readFile(ACTIVE_FILE, "utf8");
-    const j = JSON.parse(raw);
-    if (j && j.owner && j.repo && j.issue) return j;
-  } catch {}
-  return null;
-}
-
 function labelNames(issue) {
   return (issue.labels || []).map((l) => (typeof l === "string" ? l : l.name)).filter(Boolean);
 }
 
 // Build the issue-authoritative read model consumed by the webview.
-export async function buildState(target = null) {
-  const active = target || await readActive();
-  if (!active) return { active: false };
-  const { owner, repo, issue } = active;
+async function buildState(target) {
+  if (!target) return { active: false };
+  const { owner, repo, issue } = target;
   try {
     const [iss, comments] = await Promise.all([
       getIssue(owner, repo, issue),
@@ -314,7 +304,7 @@ export function deriveState({ owner, repo, issue, iss, comments }) {
 // is volatile: putting it in the 4s poll would thrash the gate panel and wipe
 // in-progress feedback text. The PR is resolved from the ACTIVE issue's derived
 // state — the client never supplies owner/repo/number.
-export async function buildPrSnapshot(target = null) {
+async function buildPrSnapshot(target) {
   const state = await buildState(target);
   if (!state || !state.active) return { available: false, reason: "no-active-issue" };
   const { owner, repo, issue } = state;
@@ -476,7 +466,6 @@ export async function startServer(deps = {}) {
       workRoot: WORK_ROOT,
       assetBase,
       instanceId: deps.instanceId || "agent-loop",
-      openPrSession: deps.openPrSession,
       refresh: async () => { if (serverEntry) broadcastRefresh(serverEntry); },
     });
     const openExternal = deps.openExternal || openInSystemBrowser;
@@ -487,7 +476,7 @@ export async function startServer(deps = {}) {
       const url = new URL(req.url || "/", "http://127.0.0.1");
       const path = url.pathname;
 
-      if (req.method === "GET" && (path === "/" || path === "")) {
+      if (req.method === "GET" && path === "/") {
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
         res.end(renderHtml(token, assetBase));
         return;
@@ -601,7 +590,7 @@ export function broadcastRefresh(entry) {
   for (const client of entry.clients) { try { client.write(payload); } catch {} }
 }
 
-export async function setActive(owner, repo, issue) {
+async function setActive(owner, repo, issue) {
   const target = validateGithubTarget({ owner, repo, issue });
   if (!existsSync(DATA_ROOT)) await mkdir(DATA_ROOT, { recursive: true });
   await writeFile(ACTIVE_FILE, JSON.stringify(target, null, 2));
