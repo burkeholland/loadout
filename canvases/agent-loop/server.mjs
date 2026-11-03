@@ -466,7 +466,6 @@ export async function startServer(deps = {}) {
       workRoot: WORK_ROOT,
       assetBase,
       instanceId: deps.instanceId || "agent-loop",
-      openPrSession: deps.openPrSession,
       refresh: async () => { if (serverEntry) broadcastRefresh(serverEntry); },
     });
     const openExternal = deps.openExternal || openInSystemBrowser;
